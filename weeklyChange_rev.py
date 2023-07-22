@@ -14,14 +14,12 @@ db = 'kpi_work'
 
 # Date information
 # Temporary using temp_running_date for developing, but need change to running_date in the productive environment
-#running_date = datetime.strptime(str(datetime.now()),'%Y-%m-%d').date()
-#print(running_date)
+running_date = datetime.now().date()
 temp_running_date = '2023/07/04'
 # following for developing
 minus_one_year = datetime.strptime(temp_running_date,'%Y/%m/%d').date() - relativedelta(years=1)
 # following for productive
 # minus_one_year = running_date - relativedelta(years=1)
-print(minus_one_year)
 
 # Connect to Database
 def create_db_connection(host_name, user_name, user_password, db_name):
@@ -55,22 +53,6 @@ def read_query(connection, query):
 ################
 # Query
 ################
-
-# # Comapny and area info
-# q_company_area = '''
-# SELECT
-#     com.id AS company_id
-#     , com.name as company_name
-#     , pa.id AS area_id
-#     , pa.name as area_name
-# FROM
-#     kpi_work.companies AS com
-#     LEFT OUTER JOIN kpi_work.plants AS pla
-#         ON com.id = pla.company_id
-#     LEFT OUTER JOIN kpi_work.plant_areas AS pa
-#         ON pla.id = pa.plant_id
-#
-# '''
 
 # Comapny and area info
 q_company_area_id = '''
@@ -143,7 +125,7 @@ ORDER BY
 
 '''
 
-# 　マーカーの週ごとの合計値を直近1年分
+# 　marker week sum through one year based on area ID
 q_marker_weekly_change = f'''
 SELECT
     plant_area_id
@@ -164,7 +146,7 @@ ORDER BY
 
 '''
 
-# 　機番の週ごとの合計値を直近1年分
+# 　machine week sum through one year based on area ID
 q_machine_weekly_change = f'''
 SELECT
     plant_area_id
@@ -183,19 +165,19 @@ ORDER BY
     plant_area_id'''
 
 
-
+# create yearweek with company and area info
 def recur_year(company_id, company_name, area_id, area_name):
     q_rec_year = f'''
     WITH RECURSIVE week_dates AS ( 
     SELECT
-        {company_id} AS company_id,'{company_name}' AS company_name,{area_id} AS area_id,'{area_name}' AS area_name, DATE ('2022-07-04') AS week_date 
+        {company_id} AS company_id,'{company_name}' AS company_name,{area_id} AS area_id,'{area_name}' AS area_name, DATE ('{minus_one_year}') AS week_date 
     UNION ALL 
     SELECT
          {company_id} AS company_id,'{company_name}' AS company_name,{area_id} AS area_id,'{area_name}' AS area_name,DATE_ADD(week_date, INTERVAL 1 WEEK) 
     FROM
         week_dates 
     WHERE
-        DATE_ADD(week_date, INTERVAL 1 WEEK) <= '2023-07-04'
+        DATE_ADD(week_date, INTERVAL 1 WEEK) <= '{temp_running_date}'
 ) 
 SELECT
     company_id,company_name,area_id,area_name,yearweek(week_date) 
@@ -205,13 +187,15 @@ FROM
     '''
     return q_rec_year
 
+# create connect to database
 conn = create_db_connection('localhost', 'root', pwd, db)
-# companyとarea
+# get company and area info
 company_areas_results = read_query(conn, q_company_area_id)
 
-# companyとareaのID情報
+# company and id info
 company_areas_ids = read_query(conn, q_company_area_id)
 
+# output company and area info with yearweek with assigned period
 with open(f"company_areas_date_info.csv", 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name', 'Date'])
@@ -229,31 +213,22 @@ for company_areas_id in company_areas_ids:
                  com_area_date_info[4]])
 
 ################
-# クエリ結果を出力
+# output query result
 ################
-# companyとareaの情報をまとめてCSVに出力
-with open(f"company_areas_info.csv", 'w', newline='', encoding='utf-8') as file:
-    writer = csv.writer(file)
-    writer.writerow(
-        ['Company ID', 'Company Name', 'Plant Area ID', 'Area Name'])
-    for company_areas_result in company_areas_results:
-        writer.writerow(
-            [company_areas_result[0], company_areas_result[1], company_areas_result[2],
-             company_areas_result[3]])
 
 # load
 company_areas_date_info = pd.read_csv(
     "C:/Users/WorkAccount/PycharmProjects/pythonProject/venv/company_areas_date_info.csv")
 
 
-# ユーザ
+# users
 user_results = read_query(conn, q_user_weekly_change)
-# 　マーカー
+# marker
 marker_results = read_query(conn, q_marker_weekly_change)
-# 機番
+# machine
 machine_results = read_query(conn, q_machine_weekly_change)
 
-# ユーザ結果をCSVに出力
+# output user result
 with open(f"user_weekly_change.csv", 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
@@ -262,7 +237,7 @@ with open(f"user_weekly_change.csv", 'w', newline='', encoding='utf-8') as file:
         writer.writerow(
             [user_result[0], user_result[1], user_result[2]])
 
-# マーカー結果をCSVに出力
+# output marker result
 with open(f"marker_weekly_change.csv", 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
@@ -271,7 +246,7 @@ with open(f"marker_weekly_change.csv", 'w', newline='', encoding='utf-8') as fil
         writer.writerow(
             [marker_result[0], marker_result[1],int(marker_result[2])])
 
-# 機番結果をCSVに出力
+# output machine result
 with open(f"machine_weekly_change.csv", 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
@@ -290,7 +265,7 @@ amm = company_areas_date_info.iloc[:,:5]
 amm = pd.merge(amm,user_weekly_change,on=["Company ID","Date"],how="left")
 amm = pd.merge(amm,marker_weekly_change,on=["Plant Area ID","Date"],how="left")
 amm = pd.merge(amm,machine_weekly_change,on=["Plant Area ID","Date"],how="left")
-# Change Date from yearweek format to week's Monday
+# change Date from yearweek format to week's Monday
 amm['Date'] = amm['Date'].apply(lambda x: datetime.fromisocalendar(int(str(x)[0:4]), int(str(x)[4:6]), 1))
 
 # output
