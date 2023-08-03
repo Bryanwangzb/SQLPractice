@@ -1,23 +1,31 @@
 import csv
 import datetime
 from datetime import datetime
-import time
-from dateutil.relativedelta import relativedelta
 
 import mysql.connector
 import pandas as pd
+from dateutil.relativedelta import relativedelta
 from mysql.connector import Error
 
-# Database account information
+# Database Schema
+schema_dev = "kpi_work"
+schema_prod = "kpi_work_prod"
+
+
+# DB Account Info
 pwd = 'KpI_Viewer3d'
-db = 'kpi_work'
+# db値、スキーマのと一致
+db = schema_prod
+
 
 # Date information
 # Temporary using temp_running_date for developing, but need change to running_date in the productive environment
 running_date = datetime.now().date()
 temp_running_date = '2023/07/04'
 # following for developing
-minus_one_year = datetime.strptime(temp_running_date,'%Y/%m/%d').date() - relativedelta(years=1)
+minus_one_year = datetime.strptime(temp_running_date, '%Y/%m/%d').date() - relativedelta(years=1)
+
+
 # following for productive
 # minus_one_year = running_date - relativedelta(years=1)
 
@@ -55,17 +63,17 @@ def read_query(connection, query):
 ################
 
 # Comapny and area info
-q_company_area_id = '''
+q_company_area_id = f'''
 SELECT
     com.id AS company_id
     , com.name as company_name
     , pa.id AS area_id 
     , pa.name as area_name
 FROM
-    kpi_work.companies AS com 
-    LEFT OUTER JOIN kpi_work.plants AS pla 
+    {db}.companies AS com 
+    LEFT OUTER JOIN {db}.plants AS pla 
         ON com.id = pla.company_id 
-    LEFT OUTER JOIN kpi_work.plant_areas AS pa 
+    LEFT OUTER JOIN {db}.plant_areas AS pa 
         ON pla.id = pa.plant_id 
 WHERE
     pla.id IS NOT NULL 
@@ -73,7 +81,7 @@ WHERE
 
 '''
 
-# User login times through one year depends on Company ID
+# User weekly sum of login times through one year depends on Company ID
 q_user_weekly_change = f'''
 WITH year_user_num AS ( 
     WITH year_change_week AS ( 
@@ -83,7 +91,7 @@ WITH year_user_num AS (
                 , company_user_id
                 , DATE (created_at) AS access_date 
             FROM
-                kpi_work.company_logs 
+                {db}.company_logs 
             WHERE
                 url = 'api/company/auth/me' 
                 AND DATE (created_at) BETWEEN '{temp_running_date}' - INTERVAL 1 YEAR AND '{temp_running_date}'
@@ -133,7 +141,7 @@ SELECT
     yearweek(created_at)year_week
     , count(plant_area_id) AS marker_weekly 
 FROM
-    kpi_work.markers 
+    {db}.markers 
 WHERE
     DATE (created_at) BETWEEN '{temp_running_date}' - INTERVAL 1 YEAR AND '{temp_running_date}'
 GROUP BY
@@ -154,7 +162,7 @@ SELECT
     yearweek(created_at)
     , count(plant_area_id) AS marker_weekly 
 FROM
-    kpi_work.assets 
+    {db}.assets 
 WHERE
     DATE (created_at) BETWEEN '{temp_running_date}' - INTERVAL 1 YEAR AND '{temp_running_date}'
 GROUP BY
@@ -186,6 +194,7 @@ FROM
 
     '''
     return q_rec_year
+
 
 # create connect to database
 conn = create_db_connection('localhost', 'root', pwd, db)
@@ -220,7 +229,6 @@ for company_areas_id in company_areas_ids:
 company_areas_date_info = pd.read_csv(
     "C:/Users/WorkAccount/PycharmProjects/pythonProject/venv/company_areas_date_info.csv")
 
-
 # users
 user_results = read_query(conn, q_user_weekly_change)
 # marker
@@ -244,7 +252,7 @@ with open(f"marker_weekly_change.csv", 'w', newline='', encoding='utf-8') as fil
         ['Plant Area ID', 'Date', 'Marker Weekly Amount'])
     for marker_result in marker_results:
         writer.writerow(
-            [marker_result[0], marker_result[1],int(marker_result[2])])
+            [marker_result[0], marker_result[1], int(marker_result[2])])
 
 # output machine result
 with open(f"machine_weekly_change.csv", 'w', newline='', encoding='utf-8') as file:
@@ -260,16 +268,15 @@ user_weekly_change = pd.read_csv("C:/Users/WorkAccount/PycharmProjects/pythonPro
 marker_weekly_change = pd.read_csv("C:/Users/WorkAccount/PycharmProjects/pythonProject/venv/marker_weekly_change.csv")
 machine_weekly_change = pd.read_csv("C:/Users/WorkAccount/PycharmProjects/pythonProject/venv/machine_weekly_change.csv")
 
-
-amm = company_areas_date_info.iloc[:,:5]
-amm = pd.merge(amm,user_weekly_change,on=["Company ID","Date"],how="left")
-amm = pd.merge(amm,marker_weekly_change,on=["Plant Area ID","Date"],how="left")
-amm = pd.merge(amm,machine_weekly_change,on=["Plant Area ID","Date"],how="left")
+amm = company_areas_date_info.iloc[:, :5]
+amm = pd.merge(amm, user_weekly_change, on=["Company ID", "Date"], how="left")
+amm = pd.merge(amm, marker_weekly_change, on=["Plant Area ID", "Date"], how="left")
+amm = pd.merge(amm, machine_weekly_change, on=["Plant Area ID", "Date"], how="left")
 # change Date from yearweek format to week's Monday
 amm['Date'] = amm['Date'].apply(lambda x: datetime.fromisocalendar(int(str(x)[0:4]), int(str(x)[4:6]), 1))
 
 # output
-amm.to_csv("./weekly_transaction_data.csv",encoding="utf-8",index=False)
+amm.to_csv("./weekly_transaction_data.csv", encoding="utf-8", index=False)
 
 # Close Database connection
 conn.close()
