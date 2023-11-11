@@ -7,10 +7,12 @@ import sys
 import time
 from logging import getLogger, config
 
+
 import mysql.connector
 import pandas as pd
 import xlwings as xw
 from mysql.connector import Error
+import configparser
 
 with open('./log_config.json', 'r') as f:
     log_conf = json.load(f)
@@ -20,22 +22,23 @@ config.dictConfig(log_conf)
 # Log Setting
 logger = getLogger(__name__)
 
-# [LOCAL]localhost endpoint
-db_host_name = 'localhost'
-# localhost user name
-db_user_name = 'root'
+# settings initial file
+inifile=configparser.ConfigParser()
+inifile.read('settings.ini')
+
+db_section='AWS_SLAVE'
+
+# get db and user info from inifile.
+db_host_name = inifile.get(db_section,'db_host_name')
+db_user_name = inifile.get(db_section,'db_user_name')
 
 # [LOCAL]Database Schema
-schema_dev = "kpi_work"
-# schema of localhost
-schema_prod = "kpi_work_prod"
+schema_dev = inifile.get(db_section,'schema_dev')
+schema_prod = inifile.get(db_section,'schema_prod')
 
-# [AWS] RDS endpoint
-# db_host_name='replication-integnance-prod-db.cjkpqvmvukox.ap-northeast-1.rds.amazonaws.com'
-# db_user_name='integnance'
-
-# [AWS] DB Schema
-# schema_prod = "integnance"
+# DBアカウント情報
+pwd = inifile.get(db_section,'pwd')
+db = schema_prod
 
 # Script directory
 script_directory = os.path.dirname(os.path.abspath(sys.argv[0]))
@@ -45,26 +48,8 @@ os.makedirs(sum_work_files, exist_ok=True)
 
 # 日付情報
 running_date = datetime.date.today()
-temp_running_date = '2023/10/27'
-
 # 　日付時刻情報
 timestr = time.strftime("%Y%m%d%H%M%S")
-#
-# # データベースのスキーマ
-# schema_dev = "kpi_work"
-# # schema of localhost
-# # schema_prod = "kpi_work_prod"
-# # schema of integnance-production-environment
-# schema_prod = "integnance"
-
-# DBアカウント情報
-# [LOCAL] pwd
-pwd = 'KpI_Viewer3d'
-# [AWS] pwd
-# pwd = 'BIadminViewer1021'
-# db値、スキーマのと一致
-db = schema_prod
-
 
 # データベースに接続
 def create_db_connection(host_name, user_name, user_password, db_name):
@@ -94,53 +79,73 @@ def read_query(connection, query):
     except Error as err:
         logger.error(f"Error: '{err}'")
 
-
+# create connect to database
+conn = create_db_connection(db_host_name, db_user_name, pwd, db)
 ################
 # クエリ
 ################
+
+q_lateste_date = f'''
+SELECT
+    MAX(DATE(created_at)) 
+FROM
+    {db}.company_logs
+'''
+
+# テーブルcompany_logsでの更新の最新日付を取得
+log_latest_date = str(read_query(conn, q_lateste_date)[0][0])
 
 # 日/週/月ごとに1回以上ログインしたユーザ数
 q_access_amount = f'''
 WITH day_access AS ( 
     SELECT
-        company_id
-        , company_user_id
-        , DATE (created_at) AS access_date 
+        cl.company_id
+        , cl.company_user_id
+        , DATE (cl.created_at) AS access_date 
     FROM
-        {db}.company_logs 
+        {db}.company_logs AS cl 
+        LEFT OUTER JOIN {db}.company_users AS cu 
+            ON cl.company_user_id = cu.id 
+            AND cl.company_id = cu.company_id 
     WHERE
         url = 'api/company/auth/me' 
-        AND DATE (created_at) = '{temp_running_date}'
+        AND DATE (cl.created_at) = '{log_latest_date}' 
+        AND cu.id IS NOT NULL
 ) 
-
 , week_access AS ( 
     SELECT
-        company_id
-        , company_user_id
-        , DATE (created_at) AS access_date 
+        cl.company_id
+        , cl.company_user_id
+        , DATE (cl.created_at) AS access_date 
     FROM
-        {db}.company_logs 
+        {db}.company_logs AS cl 
+        LEFT OUTER JOIN {db}.company_users AS cu 
+            ON cl.company_user_id = cu.id 
+            AND cl.company_id = cu.company_id 
     WHERE
         url = 'api/company/auth/me' 
-        AND DATE (created_at) BETWEEN '{temp_running_date}' - INTERVAL 1 week AND '{temp_running_date}'
+        AND DATE (cl.created_at) BETWEEN '{log_latest_date}' - INTERVAL 1 week AND '{log_latest_date}' 
+        AND cu.id IS NOT NULL
 ) 
-
 , month_access AS ( 
     SELECT
-        company_id
-        , company_user_id
-        , DATE (created_at) AS access_date 
+        cl.company_id
+        , cl.company_user_id
+        , DATE (cl.created_at) AS access_date 
     FROM
-        {db}.company_logs 
+        {db}.company_logs AS cl 
+        LEFT OUTER JOIN {db}.company_users AS cu 
+            ON cl.company_user_id = cu.id 
+            AND cl.company_id = cu.company_id 
     WHERE
         url = 'api/company/auth/me' 
-        AND DATE (created_at) BETWEEN '{temp_running_date}' - INTERVAL 1 MONTH AND '{temp_running_date}'
+        AND DATE (cl.created_at) BETWEEN '{log_latest_date}' - INTERVAL 1 MONTH AND '{log_latest_date}' 
+        AND cu.id IS NOT NULL
 ) 
-
 , month_login_user_amount AS ( 
     SELECT
         company_id
-        , company_user_id
+        , company_user_id 
     FROM
         month_access 
     GROUP BY
@@ -167,7 +172,6 @@ WITH day_access AS (
         company_id
         , company_user_id
 ) 
-
 , markers_amount AS ( 
     SELECT
         plant_area_id
@@ -194,23 +198,25 @@ WITH day_access AS (
         {db}.company_users 
     GROUP BY
         company_id
-) ,measure_amount AS ( 
+) 
+, measure_amount AS ( 
     SELECT
         plant_area_id
-        , count(plant_area_id) AS measure_amount
+        , count(plant_area_id) AS measure_amount 
     FROM
         {db}.measure_lengths 
     GROUP BY
         plant_area_id
-) ,simulation_amount AS (
+) 
+, simulation_amount AS ( 
     SELECT
         plant_area_id
-        , count(plant_area_id) AS simulation_amount
+        , count(plant_area_id) AS simulation_amount 
     FROM
-        {db}.plant_area_objects
-    GROUP BY 
+        {db}.plant_area_objects 
+    GROUP BY
         plant_area_id
-)       
+) 
 SELECT
     com.id AS company_id
     , com.name AS company_name
@@ -238,9 +244,9 @@ SELECT
         , 1
     ) AS month_user_ratio
     , mka.marker_amount AS marker_amount
-    , mca.machine_amount AS machine_amount 
+    , mca.machine_amount AS machine_amount
     , ma.measure_amount AS measure_amount
-    , sa.simulation_amount AS simulation_amount
+    , sa.simulation_amount AS simulation_amount 
 FROM
     {db}.companies AS com 
     LEFT OUTER JOIN {db}.plants AS pla 
@@ -259,9 +265,9 @@ FROM
         ON pa.id = mka.plant_area_id 
     LEFT OUTER JOIN machines_amount AS mca 
         ON pa.id = mca.plant_area_id 
-    LEFT OUTER JOIN measure_amount AS ma
-        ON pa.id = ma.plant_area_id
-    LEFT OUTER JOIN simulation_amount AS sa
+    LEFT OUTER JOIN measure_amount AS ma 
+        ON pa.id = ma.plant_area_id 
+    LEFT OUTER JOIN simulation_amount AS sa 
         ON pa.id = sa.plant_area_id 
 GROUP BY
     com.id
@@ -270,7 +276,6 @@ GROUP BY
     , pla.name
     , pa.id
     , pa.name
-
 '''
 
 # latest date from company logs
@@ -313,8 +318,6 @@ FROM
     {db}.plant_area_objects
 '''
 
-
-conn = create_db_connection(db_host_name, db_user_name, pwd, db)
 
 # load
 logger.info("Load query contents...")
