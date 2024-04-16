@@ -1,19 +1,16 @@
 # MySQLdbのインポート
+import configparser
 import csv
 import datetime
 import json
 import os
 import sys
 import time
+import boto3
 from logging import getLogger, config
 
 import mysql.connector
-import pandas as pd
-import xlwings as xw
 from mysql.connector import Error
-import configparser
-
-from openpyxl import load_workbook
 
 with open('./log_config.json', 'r') as f:
     log_conf = json.load(f)
@@ -28,6 +25,7 @@ inifile = configparser.ConfigParser()
 inifile.read('settings.ini')
 
 db_section = 'AWS_SLAVE'
+aws_section = 'AWS_ACCESS'
 
 # get db and user info from inifile.
 db_host_name = inifile.get(db_section, 'db_host_name')
@@ -36,6 +34,12 @@ db_user_name = inifile.get(db_section, 'db_user_name')
 # [LOCAL]Database Schema
 schema_dev = inifile.get(db_section, 'schema_dev')
 schema_prod = inifile.get(db_section, 'schema_prod')
+
+# AWS access info
+user_aws_access_key_id = inifile.get(aws_section, 'aws_access_key_id')
+user_aws_secret_access_key = inifile.get(aws_section, 'aws_secret_access_key')
+user_region_name = inifile.get(aws_section, 'region_name')
+kpi_bi_bucket = inifile.get(aws_section, 'Bucket')
 
 # DBアカウント情報
 pwd = inifile.get(db_section, 'pwd')
@@ -51,6 +55,14 @@ os.makedirs(sum_work_files, exist_ok=True)
 running_date = datetime.date.today()
 # 　日付時刻情報
 timestr = time.strftime("%Y%m%d%H%M%S")
+
+# S3クライアント
+client = boto3.client(
+    's3',
+    aws_access_key_id=user_aws_access_key_id,
+    aws_secret_access_key=user_aws_secret_access_key,
+    region_name=user_region_name
+)
 
 
 # データベースに接続
@@ -84,6 +96,7 @@ def read_query(connection, query):
 
 # create connect to database
 conn = create_db_connection(db_host_name, db_user_name, pwd, db)
+
 ################
 # クエリ
 ################
@@ -220,52 +233,11 @@ WITH day_access AS (
     GROUP BY
         plant_area_id
 ) 
-, company_plant_area AS (
-    SELECT     
-        com.id AS company_id
-        , com.name AS company_name
-        , pla.id AS plant_id
-        , pla.name AS plant_name
-        , pa.id AS plant_area_id
-        , pa.name AS plant_area_name
-    FROM 
-        {db}.companies AS com 
-    LEFT OUTER JOIN {db}.plants AS pla 
-        ON com.id = pla.company_id 
-    LEFT OUTER JOIN {db}.plant_areas AS pa 
-        ON pla.id = pa.plant_id 
-    WHERE pa.id IS NOT NULL
-
-    UNION
-
-    SELECT DISTINCT
-        com.id AS company_id
-        , com.name AS company_name
-        , pla.id AS plant_id
-        , pla.name AS plant_name
-        , m.plant_area_id AS plant_area_id
-        , CONCAT(pla.name, m.plant_area_id) AS plant_area_name
-    FROM
-        {db}.companies AS com
-    LEFT OUTER JOIN {db}.plants AS pla 
-        ON com.id = pla.company_id 
-    LEFT OUTER JOIN {db}.plant_areas AS pa 
-        ON pla.id = pa.plant_id 
-    LEFT OUTER JOIN {db}.company_users AS cu
-        ON com.id=cu.company_id
-    LEFT OUTER JOIN {db}.markers AS m
-        ON cu.id=m.company_user_id
-    LEFT OUTER JOIN {db}.measure_lengths as ml
-        ON cu.id=ml.company_user_id
-    LEFT OUTER JOIN {db}.plant_area_objects as pao
-        ON cu.id=pao.company_user_id
-    WHERE pa.id IS NULL AND m.plant_area_id IS NOT NULL AND m.plant_area_id<>1315
-    )
 SELECT
-    cpa.company_id AS company_id
-    , cpa.company_name AS company_name
-    , cpa.plant_area_id AS plant_area_id
-    , cpa.plant_area_name AS plant_area_name
+    com.id AS company_id
+    , com.name AS company_name
+    , pa.id AS area_id
+    , pa.name AS area_name
     , count(DISTINCT dlu.company_user_id) AS day_count
     , round( 
         ( 
@@ -292,30 +264,36 @@ SELECT
     , ma.measure_amount AS measure_amount
     , sa.simulation_amount AS simulation_amount 
 FROM
-    company_plant_area AS cpa 
+    {db}.companies AS com 
+    LEFT OUTER JOIN {db}.plants AS pla 
+        ON com.id = pla.company_id 
+    LEFT OUTER JOIN {db}.plant_areas AS pa 
+        ON pla.id = pa.plant_id 
     LEFT OUTER JOIN day_login_user_amount AS dlu 
-        ON cpa.company_id = dlu.company_id 
+        ON com.id = dlu.company_id 
     LEFT OUTER JOIN user_amount AS ua 
-        ON cpa.company_id = ua.company_id 
+        ON com.id = ua.company_id 
     LEFT OUTER JOIN week_login_user_amount AS wlu 
-        ON cpa.company_id = wlu.company_id 
+        ON com.id = wlu.company_id 
     LEFT OUTER JOIN month_login_user_amount AS mlu 
-        ON cpa.company_id = mlu.company_id 
+        ON com.id = mlu.company_id 
     LEFT OUTER JOIN markers_amount AS mka 
-        ON cpa.plant_area_id = mka.plant_area_id 
+        ON pa.id = mka.plant_area_id 
     LEFT OUTER JOIN machines_amount AS mca 
-        ON cpa.plant_area_id = mca.plant_area_id 
+        ON pa.id = mca.plant_area_id 
     LEFT OUTER JOIN measure_amount AS ma 
-        ON cpa.plant_area_id = ma.plant_area_id 
+        ON pa.id = ma.plant_area_id 
     LEFT OUTER JOIN simulation_amount AS sa 
-        ON cpa.plant_area_id = sa.plant_area_id 
+        ON pa.id = sa.plant_area_id 
+WHERE
+    pa.id IS NOT NULL
 GROUP BY
-    cpa.company_id
-    , cpa.company_name
-    , cpa.plant_id
-    , cpa.plant_name
-    , cpa.plant_area_id
-    , cpa.plant_area_name
+    com.id
+    , com.name
+    , pla.id
+    , pla.name
+    , pa.id
+    , pa.name
 '''
 
 # latest date from company logs
@@ -358,6 +336,10 @@ FROM
     {db}.plant_area_objects
 '''
 
+
+
+conn = create_db_connection(db_host_name, db_user_name, pwd, db)
+
 # load
 logger.info("Load query contents...")
 results = read_query(conn, q_access_amount)
@@ -375,38 +357,60 @@ simulation_latest_date = read_query(conn, q_simulation_latest_date)
 
 logger.info("Query contents are loaded.")
 
-with open(sum_work_files + '\\access_marker_machine_amounts' + '.csv', 'w', newline='', encoding='utf-8') as file:
+# add suffix to users,ratio,amount values.
+get_user = lambda x: str.strip(str(x)) + " users"
+get_ratio = lambda x: str(x or '0.0') + "%"
+get_amount = lambda x: str(x or '0') + " pcs"
+
+with open(sum_work_files + '\\pb_access_marker_machine_amounts' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
-        ['Update Date', 'Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name', 'Day Access Amount',
-         'Day Access Ratio (%)', 'Week Access Amount', 'Week Access Ratio (%)', 'Month Access Amount',
-         'Month Access Ratio (%)',
+        ['Update Date', 'Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name', 'Day Access Amount (Ratio)',
+         'Week Access Amount (Ratio)', 'Month Access Amount (Ratio)',
          'Marker Total Registered', 'Machine Total Registered', 'Measurement Total Registered',
          'Simulation Total Registered',
          'company_logs_UpdateDate', 'markers_UpdateDate',
-         'assets_UpdateDate', 'measurements_UpdateDate', 'simulation_UpdateDate'])
+         'assets_UpdateDate', 'measurements_UpdateDate', 'simulation_UpdateDate', 'Data_LatestDate'])
     for result in results:
         writer.writerow(
-            [running_date, result[0], result[1], result[2], result[3], result[4], result[5], result[6],
-             result[7], result[8], result[9], result[10], result[11], result[12], result[13], company_log_latest_date[0]
+            [running_date, result[0], result[1], result[2], result[3],
+             get_user(result[4]) + " (" + get_ratio(result[5]) + ")",
+             get_user(result[6]) + " (" + get_ratio(result[7]) + ")"
+                , get_user(result[8]) + " (" + get_ratio(result[9]) + ")", get_amount(result[10]),
+             get_amount(result[11]), get_amount(result[12]), get_amount(result[13]), company_log_latest_date[0]
              [0], marker_latest_date[0][0], machine_latest_date[0][0], measurement_latest_date[0][0],
-             simulation_latest_date[0][0]])
+             simulation_latest_date[0][0],
+             max(marker_latest_date[0][0], machine_latest_date[0][0], measurement_latest_date[0][0],
+                 simulation_latest_date[0][0])])
 logger.info("access_marker_machine_contents csv file is created.")
+
+# company, plant area ID and name
+with open(sum_work_files + '\\company_area_master' + '.csv','w',newline='',encoding='utf-8') as  file:
+    writer = csv.writer(file)
+    writer.writerow(
+        ['Company ID','Company Name','Plant Area ID','Plant Area Name']
+    )
+    for result in results:
+        writer.writerow(
+            [result[0],result[1],result[2],result[3]]
+        )
+logger.info("company_area_master csv file is created.")
 
 # Update BI workbook's weekly transaction sheet.
 logger.info("Updating BI file...")
-df_access_amounts = pd.read_csv(sum_work_files + '\\access_marker_machine_amounts' + '.csv')
-BI_workbook = xw.Book("brown_reverse_KPI BI.xlsx")
 
-ws_access_amounts = BI_workbook.sheets("access_marker_machine_amount")
-
-ws_access_amounts.cells.clear()
-
-ws_access_amounts.cells(1, 1).options(index=False).value = df_access_amounts
-
-BI_workbook.save()
-BI_workbook.close()
-
+# BI_workbook.save()
+# BI_workbook.close()
 logger.info("BI file updating is completed.")
+
+# Add company_area_master.csv file here
+
+# Upload csv file to AWS S3 bucket
+logger.info("Upload file to AWS S3 bucket...")
+Filename = './sum_work_files/pb_access_marker_machine_amounts.csv'
+Bucket = kpi_bi_bucket
+Key = 'pb_access_marker_machine_amounts.csv'
+client.upload_file(Filename, Bucket, Key)
+logger.info('CSV file is uploaded.')
 # 接続を閉じる
 conn.close()

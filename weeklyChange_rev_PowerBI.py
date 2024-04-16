@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 import sys
+import boto3
 from datetime import datetime
 from logging import getLogger, config
 
@@ -26,6 +27,7 @@ inifile = configparser.ConfigParser()
 inifile.read('settings.ini')
 
 db_section = 'AWS_SLAVE'
+aws_section = 'AWS_ACCESS'
 
 # get db and user info from inifile.
 db_host_name = inifile.get(db_section, 'db_host_name')
@@ -34,6 +36,12 @@ db_user_name = inifile.get(db_section, 'db_user_name')
 # [LOCAL]Database Schema
 schema_dev = inifile.get(db_section, 'schema_dev')
 schema_prod = inifile.get(db_section, 'schema_prod')
+
+# AWS access info
+user_aws_access_key_id = inifile.get(aws_section, 'aws_access_key_id')
+user_aws_secret_access_key = inifile.get(aws_section, 'aws_secret_access_key')
+user_region_name = inifile.get(aws_section, 'region_name')
+kpi_bi_bucket = inifile.get(aws_section, 'Bucket')
 
 # DBアカウント情報
 pwd = inifile.get(db_section, 'pwd')
@@ -45,6 +53,20 @@ script_directory = os.path.dirname(os.path.abspath(sys.argv[0]))
 weekly_work_files = os.path.join(script_directory, "weekly_work_files")
 os.makedirs(weekly_work_files, exist_ok=True)
 
+# S3 Client
+client = boto3.client(
+    's3',
+    aws_access_key_id=user_aws_access_key_id,
+    aws_secret_access_key=user_aws_secret_access_key,
+    region_name=user_region_name
+)
+
+# Date information
+# Temporary using temp_running_date for developing, but need change to running_date in the productive environment
+# running_date = datetime.now().date()
+# get the latest date from company_log
+# following for productive
+# minus_one_year = running_date - relativedelta(years=1)
 
 # Connect to Database
 def create_db_connection(host_name, user_name, user_password, db_name):
@@ -81,7 +103,6 @@ conn = create_db_connection(db_host_name, db_user_name, pwd, db)
 ################
 # Query
 ################
-
 q_lateste_date = f'''
 SELECT
     MAX(DATE(created_at)) 
@@ -93,9 +114,9 @@ FROM
 q_company_area_id = f'''
 SELECT
     com.id AS company_id
-    , com.name AS company_name
-    , pa.id AS area_id
-    , pa.name AS area_name 
+    , com.name as company_name
+    , pa.id AS area_id 
+    , pa.name as area_name
 FROM
     {db}.companies AS com 
     LEFT OUTER JOIN {db}.plants AS pla 
@@ -103,33 +124,11 @@ FROM
     LEFT OUTER JOIN {db}.plant_areas AS pa 
         ON pla.id = pa.plant_id 
 WHERE
-    pa.id IS NOT NULL 
-UNION 
-SELECT DISTINCT
-    com.id AS company_id
-    , com.name AS company_name
-    , m.plant_area_id AS area_id
-    ,CONCAT(pla.name, m.plant_area_id) AS area_name
-FROM
-    {db}.companies AS com 
-    LEFT OUTER JOIN {db}.plants AS pla 
-        ON com.id = pla.company_id 
-    LEFT OUTER JOIN {db}.plant_areas AS pa 
-        ON pla.id = pa.plant_id 
-    LEFT OUTER JOIN {db}.company_users AS cu 
-        ON com.id = cu.company_id 
-    LEFT OUTER JOIN {db}.markers AS m
-        ON cu.id=m.company_user_id
-    LEFT OUTER JOIN {db}.measure_lengths as ml
-        ON cu.id=ml.company_user_id
-    LEFT OUTER JOIN {db}.plant_area_objects as pao
-        ON cu.id=pao.company_user_id
-    WHERE pa.id IS NULL AND m.plant_area_id IS NOT NULL
+    pla.id IS NOT NULL 
+    AND pa.id IS NOT NULL
 '''
-
 # get latest data
 running_date = str(read_query(conn, q_lateste_date)[0][0])
-
 minus_one_year = datetime.strptime(running_date, '%Y-%m-%d').date() - relativedelta(years=1)
 
 # User weekly sum of login times through one year depends on Company ID
@@ -150,13 +149,13 @@ year_change_week AS (
     SELECT
         company_id,
         company_user_id,
-        yearweek(access_date,1) AS year_week
+        yearweek(access_date) AS year_week
     FROM
         year_access
     GROUP BY
         company_id,
         company_user_id,
-        yearweek(access_date,1)
+        yearweek(access_date)
 ),
 
 year_user_num AS (
@@ -190,7 +189,7 @@ q_marker_weekly_change = f'''
 SELECT
     plant_area_id
     , 
-    yearweek(created_at,1) year_week
+    yearweek(created_at)year_week
     , count(plant_area_id) AS marker_weekly 
 FROM
     {db}.markers 
@@ -199,7 +198,7 @@ WHERE
 GROUP BY
     plant_area_id
     , 
-    yearweek(created_at,1)
+    yearweek(created_at)
   
 ORDER BY
     plant_area_id
@@ -211,7 +210,7 @@ q_machine_weekly_change = f'''
 SELECT
     plant_area_id
     , 
-    yearweek(created_at,1)
+    yearweek(created_at)
     , count(plant_area_id) AS marker_weekly 
 FROM
     {db}.assets 
@@ -220,7 +219,7 @@ WHERE
 GROUP BY
     plant_area_id
     , 
-    yearweek(created_at,1)
+    yearweek(created_at)
 ORDER BY
     plant_area_id'''
 
@@ -228,7 +227,7 @@ ORDER BY
 q_measure_weekly_change = f'''
 SELECT
     plant_area_id
-    , yearweek(created_at,1) year_week
+    , yearweek(created_at) year_week
     , count(plant_area_id) AS marker_weekly 
 FROM
     {db}.measure_lengths 
@@ -236,7 +235,7 @@ WHERE
     DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
 GROUP BY
     plant_area_id
-    , yearweek(created_at,1) 
+    , yearweek(created_at) 
 ORDER BY
     plant_area_id
 '''
@@ -245,7 +244,7 @@ ORDER BY
 q_simulation_weekly_change = f'''
 SELECT
     plant_area_id
-    , yearweek(created_at,1) year_week
+    , yearweek(created_at) year_week
     , count(plant_area_id) AS marker_weekly 
 FROM
     {db}.plant_area_objects 
@@ -253,7 +252,7 @@ WHERE
     DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
 GROUP BY
     plant_area_id
-    , yearweek(created_at,1) 
+    , yearweek(created_at) 
 ORDER BY
     plant_area_id
 '''
@@ -264,26 +263,17 @@ def recur_year(company_id, company_name, area_id, area_name):
     q_rec_year = f'''
     WITH RECURSIVE week_dates AS ( 
     SELECT
-        {company_id} AS company_id,
-        '{company_name}' AS company_name,
-        {area_id} AS area_id,'{area_name}' AS area_name,
-        DATE ('{minus_one_year}') AS week_date 
+        {company_id} AS company_id,'{company_name}' AS company_name,{area_id} AS area_id,'{area_name}' AS area_name, DATE ('{minus_one_year}') AS week_date 
     UNION ALL 
     SELECT
-         {company_id} AS company_id,
-         '{company_name}' AS company_name,
-         {area_id} AS area_id,'{area_name}' AS area_name,
-         DATE_ADD(week_date, INTERVAL 1 WEEK) 
+         {company_id} AS company_id,'{company_name}' AS company_name,{area_id} AS area_id,'{area_name}' AS area_name,DATE_ADD(week_date, INTERVAL 1 WEEK) 
     FROM
         week_dates 
     WHERE
         DATE_ADD(week_date, INTERVAL 1 WEEK) <= '{running_date}'
 ) 
 SELECT
-    company_id,
-    company_name,
-    area_id,area_name,
-    CONCAT(YEAR(week_date), LPAD(WEEK(week_date, 1), 2, '0')) AS formatted_week
+    company_id,company_name,area_id,area_name,yearweek(week_date) 
 FROM
     week_dates;
 
@@ -408,18 +398,27 @@ amm['Date'] = amm['Date'].apply(lambda x: datetime.fromisocalendar(int(str(x)[0:
 
 # output
 amm.to_csv(weekly_work_files + '\weekly_transaction_data' + '.csv', encoding="utf-8", index=False)
-logger.info("weekly_transaction_data csv file is created.")
+logger.info("weekly_transaction_data csv file is created!")
 
 # Update BI workbook's weekly transaction sheet.
 logger.info("Updating BI file...")
 df_weekly_transaction = pd.read_csv(weekly_work_files + '\weekly_transaction_data' + '.csv')
-BI_workbook = xw.Book("brown_reverse_KPI BI.xlsx")
-ws_weekly_transaction = BI_workbook.sheets("weekly_transaction")
-ws_weekly_transaction.cells.clear()
-ws_weekly_transaction.cells(1, 1).options(index=False).value = df_weekly_transaction
-
-BI_workbook.save()
-BI_workbook.close()
+# BI_workbook = xw.Book("brown_reverse_KPI BI.xlsx")
+# ws_weekly_transaction = BI_workbook.sheets("weekly_transaction")
+# ws_weekly_transaction.cells.clear()
+# ws_weekly_transaction.cells(1, 1).options(index=False).value = df_weekly_transaction
+#
+# BI_workbook.save()
+# BI_workbook.close()
 logger.info("BI file updating is completed.")
 # Close Database connection
+# Upload csv file to AWS S3 bucket
+logger.info("Upload file to AWS S3 bucket...")
+Filename = './weekly_work_files/weekly_transaction_data.csv'
+Bucket = kpi_bi_bucket
+Key = 'weekly_transaction_data.csv'
+client.upload_file(Filename, Bucket, Key)
+logger.info('CSV file is uploaded.')
+
+
 conn.close()
