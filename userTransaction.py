@@ -46,6 +46,9 @@ script_directory = os.path.dirname(os.path.abspath(sys.argv[0]))
 user_transaction_files = os.path.join(script_directory, "user_transaction_files")
 os.makedirs(user_transaction_files, exist_ok=True)
 
+# object export and import file
+table_url_csv = ''
+
 # 日付情報
 running_date = datetime.date.today()
 # 　日付時刻情報
@@ -166,6 +169,10 @@ SELECT
     , DATE (cu.created_at) AS registered_date
     , cu.id AS user_id
     , cu.name AS user_name 
+    , CASE
+        WHEN cu.email like '%@brownreverse%' THEN 1
+        ELSE 0
+    END AS is_brs_user
 FROM
     {db}.companies AS com 
     LEFT OUTER JOIN {db}.company_users AS cu 
@@ -209,6 +216,7 @@ FROM
         ON t.company_id = cu.company_id 
 WHERE
     DATE (created_at) < t.DATE 
+    AND cu.email NOT LIKE '%@brownreverse%'
 GROUP BY
     t.company_id
     , t.company_name
@@ -431,24 +439,30 @@ WITH RECURSIVE DateRange AS (
 # markers daily info
 q_marker_daily_info = f'''
 SELECT
-    plant_area_id
-    , date (created_at)
+    m.plant_area_id
+    , date (m.created_at)
     , COUNT(*) AS marker_daily_amount
     , COUNT( 
         CASE 
-            WHEN created_at <> updated_at 
-            and deleted_at is null 
+            WHEN m.created_at <> m.updated_at 
+            and m.deleted_at is null 
                 THEN 1 
             END
     ) as marker_daily_updated_amount
-    , COUNT(CASE WHEN deleted_at IS NOT NULL THEN 1 END) as marker_daily_deleted_amount 
+    , COUNT(CASE WHEN m.deleted_at IS NOT NULL THEN 1 END) as marker_daily_deleted_amount 
 FROM
-    markers 
+    markers AS m
+LEFT OUTER JOIN
+    {db}.company_users as cu
+ON
+    m.company_user_id = cu.id    
 WHERE
-    DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+    DATE (m.created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+AND
+    cu.email not like '%@brownreverse%'
 GROUP BY
-    plant_area_id
-    , date (created_at)
+    m.plant_area_id
+    , date (m.created_at)
 '''
 
 # machine daily info
@@ -471,49 +485,61 @@ GROUP BY
 # measure length daily info
 q_measurement_length_info = f'''
 SELECT
-    plant_area_id
-    , date (created_at)
+    ml.plant_area_id
+    , date (ml.created_at)
     , count(*) AS measurement_lengths_daily_amount
     , COUNT( 
         CASE 
-            WHEN created_at <> updated_at 
-            and deleted_at is null 
+            WHEN ml.created_at <> ml.updated_at 
+            and ml.deleted_at is null 
                 THEN 1 
             END
     ) as measurement_lengths_daily_updated_amount
-    , COUNT(CASE WHEN deleted_at IS NOT NULL THEN 1 END) as measure_lengths_daily_deleted_amount 
+    , COUNT(CASE WHEN ml.deleted_at IS NOT NULL THEN 1 END) as measure_lengths_daily_deleted_amount 
 FROM
-    measure_lengths 
+    {db}.measure_lengths AS ml
+LEFT OUTER JOIN
+    {db}.company_users as cu
+ON
+    ml.company_user_id = cu.id
 WHERE
-    DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+    DATE (ml.created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+AND
+    cu.email not like '%@brownreverse%'
 GROUP BY
-    plant_area_id
-    , date (created_at) 
+    ml.plant_area_id
+    , date (ml.created_at) 
 '''
 
 # simulation daily info
 q_simulation_daily_info = f'''
 SELECT
-    plant_area_id
-    , date (created_at)
+    pao.plant_area_id
+    , date (pao.created_at)
     , count(*) AS simulation_daily_amount
     , COUNT( 
         CASE 
-            WHEN created_at <> updated_at 
-            and deleted_at is null 
+            WHEN pao.created_at <> pao.updated_at 
+            and pao.deleted_at is null 
                 THEN 1 
             END
     ) as simulation_daily_updated_amount
-    , COUNT(CASE WHEN deleted_at IS NOT NULL THEN 1 END) as simulation_daily_deleted_amount 
+    , COUNT(CASE WHEN pao.deleted_at IS NOT NULL THEN 1 END) as simulation_daily_deleted_amount 
 FROM
-    plant_area_objects 
+    {db}.plant_area_objects  as pao
+LEFT OUTER JOIN
+    {db}.company_users as cu
+ON
+    pao.company_user_id = cu.id
 WHERE
-    DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+    DATE (pao.created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+AND
+    cu.email not like '%@brownreverse%'
 GROUP BY
-    plant_area_id
-    , date (created_at) 
+    pao.plant_area_id
+    , date (pao.created_at) 
 ORDER BY
-    plant_area_id
+    pao.plant_area_id
 '''
 
 # pipenavi daily info
@@ -539,6 +565,36 @@ GROUP BY
     , date (created_at) 
 
 '''
+
+# Generate sql for objects' import and export
+def object_import_export(table_url_csv,db,running_date):
+    import_export_sql = f"""
+    SELECT
+        plant_area_id
+        , date(created_at)
+        , count(*) AS {count_alias}
+    FROM
+        {db}.company_logs
+    WHERE
+        url = '{url}' AND DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+    GROUP BY
+        plant_area_id
+        , DATE (created_at)
+    """
+
+    sql_queries = []
+    with open(table_url_csv,'r') as file:
+        reader = csv.reader(file)
+        for row in reader:
+            if row:
+                url = row[0]
+                count_alias = url.split('/')[-1]
+                sql_query = import_export_sql.format(db=db,table=table,url=url,running_date=running_date,count_alias=coount_alias)
+                sql_queries.append(sql_query)
+
+    # Concatenate all SQL queries with UNION ALL
+    final_sql_query = ' UNION ALL '.join(sql_queries)
+    return final_sql_query
 
 ################
 # 実行結果
@@ -607,11 +663,11 @@ logger.info("user_distinct_activity_log csv file is created")
 # output user account data
 with open(user_transaction_files + '\\user_account_data' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow(['Company ID', 'Company Name', 'Registered Date', 'User ID', 'User Name', 'Update Date'])
+    writer.writerow(['Company ID', 'Company Name', 'Registered Date', 'User ID', 'User Name', 'IS BRS User','Update Date'])
     for user_account_data in user_account_datas:
         writer.writerow(
             [user_account_data[0], user_account_data[1], user_account_data[2], user_account_data[3],
-             user_account_data[4], running_date])
+             user_account_data[4], user_account_data[5],running_date])
 logger.info("user_account_data csv file is created")
 
 # output user account total count
@@ -629,13 +685,13 @@ logger.info("user_account_total_count csv file is created")
 with open(user_transaction_files + '\\registered_object_master' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name', 'Object ID', 'Object Name',
-                     'Object Category', 'Object Registered Date', 'Object Update Date', 'Deleted Date'])
+                     'Object Category', 'Object Registered Date', 'Object Update Date', 'Deleted Date','User ID','User Name'])
     for registered_object_master in registered_object_masters:
         writer.writerow(
             [registered_object_master[0], registered_object_master[1], registered_object_master[2],
              registered_object_master[3], registered_object_master[4],
              registered_object_master[5], registered_object_master[6], registered_object_master[7],
-             registered_object_master[8], registered_object_master[9]]
+             registered_object_master[8], registered_object_master[9],registered_object_master[10],registered_object_master[11]]
         )
 logger.info("registered_object_master csv file is created")
 
