@@ -567,34 +567,41 @@ GROUP BY
 '''
 
 # Generate sql for objects' import and export
-def object_import_export(table_url_csv,db,running_date):
+def object_import_export(table_url_csv):
     import_export_sql = f"""
     SELECT
-        plant_area_id
-        , date(created_at)
-        , count(*) AS {count_alias}
+        CASE 
+            WHEN plant_area_id IS NOT NULL 
+            THEN plant_area_id 
+            ELSE COALESCE( 
+                JSON_EXTRACT(request_parameters,'$.plant_area_id')
+                , plant_area_id
+            ) 
+        END AS plant_area_id
+        , DATE(created_at)
+        , COUNT(*) AS %s
     FROM
         {db}.company_logs
     WHERE
-        url = '{url}' AND DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+        DATE (created_at) BETWEEN '%s' - INTERVAL 1 YEAR AND '%s' AND url = '%s'
     GROUP BY
         plant_area_id
-        , DATE (created_at)
+        , DATE (created_at) 
     """
 
-    sql_queries = []
-    with open(table_url_csv,'r') as file:
+    sql_queries = {}
+    with open(table_url_csv, 'r',encoding='utf-8') as file:
         reader = csv.reader(file)
         for row in reader:
             if row:
                 url = row[0]
                 count_alias = url.split('/')[-1]
-                sql_query = import_export_sql.format(db=db,table=table,url=url,running_date=running_date,count_alias=coount_alias)
-                sql_queries.append(sql_query)
+                sql_query=import_export_sql % (count_alias,running_date,running_date,url)
+                sql_queries[count_alias] = sql_query
 
-    # Concatenate all SQL queries with UNION ALL
-    final_sql_query = ' UNION ALL '.join(sql_queries)
-    return final_sql_query
+    return sql_queries
+
+
 
 ################
 # 実行結果
@@ -640,6 +647,9 @@ simulation_daily_info = read_query(conn, q_simulation_daily_info)
 # get pipeNavi daily info
 pipe_daily_info = read_query(conn, q_pipe_daily_info)
 
+# get objects' import and output queries list
+object_queries = object_import_export('url_list.csv')
+
 # output user activity log
 with open(user_transaction_files + '\\user_activity_log' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
@@ -663,11 +673,12 @@ logger.info("user_distinct_activity_log csv file is created")
 # output user account data
 with open(user_transaction_files + '\\user_account_data' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow(['Company ID', 'Company Name', 'Registered Date', 'User ID', 'User Name', 'IS BRS User','Update Date'])
+    writer.writerow(
+        ['Company ID', 'Company Name', 'Registered Date', 'User ID', 'User Name', 'IS BRS User', 'Update Date'])
     for user_account_data in user_account_datas:
         writer.writerow(
             [user_account_data[0], user_account_data[1], user_account_data[2], user_account_data[3],
-             user_account_data[4], user_account_data[5],running_date])
+             user_account_data[4], user_account_data[5], running_date])
 logger.info("user_account_data csv file is created")
 
 # output user account total count
@@ -685,13 +696,15 @@ logger.info("user_account_total_count csv file is created")
 with open(user_transaction_files + '\\registered_object_master' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name', 'Object ID', 'Object Name',
-                     'Object Category', 'Object Registered Date', 'Object Update Date', 'Deleted Date','User ID','User Name'])
+                     'Object Category', 'Object Registered Date', 'Object Update Date', 'Deleted Date', 'User ID',
+                     'User Name'])
     for registered_object_master in registered_object_masters:
         writer.writerow(
             [registered_object_master[0], registered_object_master[1], registered_object_master[2],
              registered_object_master[3], registered_object_master[4],
              registered_object_master[5], registered_object_master[6], registered_object_master[7],
-             registered_object_master[8], registered_object_master[9],registered_object_master[10],registered_object_master[11]]
+             registered_object_master[8], registered_object_master[9], registered_object_master[10],
+             registered_object_master[11]]
         )
 logger.info("registered_object_master csv file is created")
 
@@ -761,9 +774,24 @@ with open(user_transaction_files + '\pipe_daily_info' + '.csv', 'w', newline='',
         ['Plant Area ID', 'Date', 'PipeNavi Daily Registered', 'PipeNavi Daily Updated', 'PipeNavi Daily Deleted'])
     for _pipe_daily_info in pipe_daily_info:
         writer.writerow(
-            [_pipe_daily_info[0], _pipe_daily_info[1], int(_pipe_daily_info[2]), int(_pipe_daily_info[3]), int(_pipe_daily_info[4])]
+            [_pipe_daily_info[0], _pipe_daily_info[1], int(_pipe_daily_info[2]), int(_pipe_daily_info[3]),
+             int(_pipe_daily_info[4])]
         )
 logger.info("pipe_segment_daily_info csv file was created.")
+
+# get object daily info and Output asset export daily info
+for object,object_sql in object_queries.items():
+    object_query_daily_info = read_query(conn,object_sql)
+    with open(user_transaction_files + '\\'+object+'.csv','w',newline='',encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Plant Area ID','Date',object])
+        for _object_daily_info in object_query_daily_info:
+            writer.writerow(
+                [_object_daily_info[0], _object_daily_info[1], _object_daily_info[2]]
+            )
+    logger.info(object+" csv file was created.")
+
+
 
 # load
 logger.info("Loading each csv files...")
@@ -793,5 +821,5 @@ new_column_order = ['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area N
 
 cad = cad.reindex(columns=new_column_order)
 # output
-cad.to_csv(user_transaction_files + '\daily_object_transaction_data' + '.csv', encoding="utf-8", index = False)
+cad.to_csv(user_transaction_files + '\daily_object_transaction_data' + '.csv', encoding="utf-8", index=False)
 logger.info("daily_object_transaction_data csv file is created.")
