@@ -9,6 +9,7 @@ import time
 from logging import getLogger, config
 
 import mysql.connector
+import numpy as np
 import pandas as pd
 import xlwings as xw
 from mysql.connector import Error
@@ -98,27 +99,63 @@ FROM
 latest_date = str(read_query(conn, q_lateste_date)[0][0])
 
 q_user_activity = f'''
-SELECT 
-    company_user_id
-    , DATE(created_at)
+WITH get_information AS ( 
+    SELECT
+        company_user_id
+        , DATE (created_at) AS date_created_at
+        , count(*) AS get_info_count 
+    FROM
+        {db}.company_logs 
+    WHERE
+        url = 'api/company/get_information_list' 
+        AND DATE (created_at) BETWEEN DATE_SUB('{latest_date}', INTERVAL 1 YEAR) AND '{latest_date}' 
+    GROUP BY
+        company_user_id
+        , DATE (created_at) 
+    ORDER BY
+        company_user_id
+        , DATE (created_at) ASC
+) 
+SELECT
+    cu.id AS company_user_id
+    , DATE (cl.created_at)
+    , CASE 
+        WHEN cl.platform = '1' 
+            THEN 'web' 
+        WHEN cl.platform = '2' 
+            THEN 'ios' 
+        ELSE cl.platform 
+        END AS access_from
+    , gi.get_info_count 
 FROM
-    {db}.company_logs 
+    {db}.company_logs AS cl 
+    LEFT OUTER JOIN {db}.company_users AS cu 
+        ON JSON_UNQUOTE(json_extract(cl.request_parameters, '$.email')) = cu.email 
+    LEFT OUTER JOIN get_information AS gi 
+        ON cu.id = gi.company_user_id 
+        AND DATE (cl.created_at) = date_created_at 
 WHERE
-    url = 'api/company/auth/me' 
-    AND DATE (created_at) BETWEEN DATE_SUB('{latest_date}', INTERVAL 1 YEAR) AND '{latest_date}'
-ORDER BY company_user_id,DATE(created_at) asc
+    url = 'api/company/auth/login' 
+    AND DATE (cl.created_at) BETWEEN DATE_SUB('{latest_date}', INTERVAL 1 YEAR) AND '{latest_date}' 
+ORDER BY
+    cu.id
+    , DATE (cl.created_at) ASC
 '''
 
 q_distinct_user_activity = f'''
 SELECT DISTINCT
-    company_user_id
-    , DATE(created_at)
+    cu.id
+    , DATE (cl.created_at) 
 FROM
-    {db}.company_logs 
+    company_logs AS cl 
+    LEFT OUTER JOIN company_users AS cu 
+        ON JSON_UNQUOTE(json_extract(cl.request_parameters, '$.email')) = cu.email 
 WHERE
-    url = 'api/company/auth/me' 
-    AND DATE (created_at) BETWEEN DATE_SUB('{latest_date}', INTERVAL 1 YEAR) AND '{latest_date}'
-ORDER BY company_user_id,DATE(created_at) asc
+    cl.url = 'api/company/auth/login' 
+    AND DATE (cl.created_at) BETWEEN DATE_SUB('{latest_date}', INTERVAL 1 YEAR) AND '{latest_date}' 
+ORDER BY
+    cu.id
+    , DATE (cl.created_at) ASC
 '''
 
 # latest date from company logs
@@ -163,20 +200,43 @@ FROM
 
 # user account info
 q_user_account = f'''
+WITH initial_login_info AS ( 
+    SELECT
+        cu.id AS company_user_id
+        , min(DATE (cl.created_at)) AS initial_login_date 
+        , max(DATE (cl.created_at)) AS last_login_date
+    FROM
+        {db}.company_logs AS cl 
+        LEFT OUTER JOIN {db}.company_users AS cu 
+            ON JSON_UNQUOTE(json_extract(cl.request_parameters, '$.email')) = cu.email 
+    WHERE
+        cl.url = 'api/company/auth/login' 
+        AND cu.email NOT LIKE '%@brownreverse%' 
+    GROUP BY
+        cu.id 
+    ORDER BY
+        cu.id
+        , DATE (cl.created_at) ASC
+) 
 SELECT
     com.id AS company_id
     , com.name AS company_name
     , DATE (cu.created_at) AS registered_date
     , cu.id AS user_id
-    , cu.name AS user_name 
-    , CASE
-        WHEN cu.email like '%@brownreverse%' THEN 1
-        ELSE 0
-    END AS is_brs_user
+    , cu.name AS user_name
+    , CASE 
+        WHEN cu.email LIKE '%@brownreverse%' 
+            THEN 1 
+        ELSE 0 
+        END AS is_brs_user
+    , ili.initial_login_date 
+    , ili.last_login_date
 FROM
     {db}.companies AS com 
     LEFT OUTER JOIN {db}.company_users AS cu 
-        ON com.id = cu.company_id
+        ON com.id = cu.company_id 
+    LEFT OUTER JOIN initial_login_info AS ili 
+        ON cu.id = ili.company_user_id
 '''
 
 q_user_account_total_count = f'''
@@ -557,7 +617,7 @@ SELECT
     ) as pipe_segment_daily_updated_amount
     , COUNT(CASE WHEN deleted_at IS NOT NULL THEN 1 END) as pipe_segment_daily_deleted_amount 
 FROM
-    pipe_segments
+    {db}.pipe_groups
 WHERE
     DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
 GROUP BY
@@ -566,8 +626,23 @@ GROUP BY
 
 '''
 
-# Generate sql for objects' import and export
-def object_import_export(table_url_csv):
+# company_area_master
+q_company_area_master_infos = f'''
+SELECT
+    com.id AS company_id
+    , com.name as company_name
+    , pa.id AS area_id 
+    , pa.name as area_name
+FROM
+    {db}.companies AS com 
+    LEFT OUTER JOIN {db}.plants AS pla 
+        ON com.id = pla.company_id 
+    LEFT OUTER JOIN {db}.plant_areas AS pa 
+        ON pla.id = pa.plant_id
+'''
+
+# Generate sql for objects' import and export based on area.
+def object_import_export_area(table_url_csv):
     import_export_sql = f"""
     SELECT
         CASE 
@@ -601,6 +676,61 @@ def object_import_export(table_url_csv):
 
     return sql_queries
 
+# Generate sql for objects' import and export based on company.
+def object_import_export_company(table_url_csv):
+    import_export_sql = f"""
+    WITH company_area_relation AS ( 
+    SELECT
+        com.id AS company_id
+        , pa.id AS plant_area_id 
+    FROM
+        {db}.companies AS com 
+        LEFT OUTER JOIN ( 
+            SELECT
+                *
+                , ROW_NUMBER() OVER (PARTITION BY company_id ORDER BY company_id) AS row_num 
+            FROM
+                {db}.plants
+        ) AS pla 
+        ON com.id = pla.company_id 
+        LEFT OUTER JOIN ( 
+            SELECT
+                *
+                , ROW_NUMBER() OVER (PARTITION BY plant_id ORDER BY plant_id) AS row_num 
+            FROM
+                {db}.plant_areas
+        ) AS pa 
+        ON pla.id = pa.plant_id 
+    WHERE
+        pla.row_num = 1 
+        AND pa.row_num = 1)
+    SELECT
+        car.plant_area_id
+        ,DATE(col.created_at)
+        ,count(*) as %s
+    FROM
+        {db}.company_logs AS col
+    LEFT OUTER JOIN
+        company_area_relation AS car
+    ON
+        col.company_id = car.company_id
+    WHERE 
+         DATE (created_at) BETWEEN '%s' - INTERVAL 1 YEAR AND '%s' AND url = '%s'
+    GROUP BY 
+        car.plant_area_id,DATE (col.created_at)
+    """
+
+    sql_queries = {}
+    with open(table_url_csv, 'r',encoding='utf-8') as file:
+        reader = csv.reader(file)
+        for row in reader:
+            if row:
+                url = row[0]
+                count_alias = url.split('/')[-1]
+                sql_query=import_export_sql % (count_alias,running_date,running_date,url)
+                sql_queries[count_alias] = sql_query
+
+    return sql_queries
 
 
 ################
@@ -647,18 +777,38 @@ simulation_daily_info = read_query(conn, q_simulation_daily_info)
 # get pipeNavi daily info
 pipe_daily_info = read_query(conn, q_pipe_daily_info)
 
+# get company area info
+q_company_area_master_infos = read_query(conn,q_company_area_master_infos)
+
+
 # get objects' import and output queries list
-object_queries = object_import_export('url_list.csv')
+object_area_queries = object_import_export_area('object_by_area.csv')
+
+# get objects' import and output queries list
+object_company_queries = object_import_export_company('object_by_company.csv')
+
 
 # output user activity log
-with open(user_transaction_files + '\\user_activity_log' + '.csv', 'w', newline='', encoding='utf-8') as file:
+with open(user_transaction_files + '\\user_activity_tmp_log' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow(['User ID', 'Login Date'])
+    writer.writerow(['User ID', 'Login Date','Access From','Check info'])
     for user_activity_result in user_activity_results:
         writer.writerow(
-            [user_activity_result[0], user_activity_result[1]]
+            [user_activity_result[0], user_activity_result[1],user_activity_result[2],user_activity_result[3]]
         )
-logger.info("user_activity_log csv file is created")
+logger.info("user_activity_tmp_log csv file is created")
+
+df_user_activity_log = pd.read_csv(user_transaction_files + '\\user_activity_tmp_log.csv')
+# Group by User ID and Login Date, then update 'check info' column
+df_user_activity_log['Check info'] = df_user_activity_log.groupby(['User ID','Login Date'])['Check info'].transform(lambda x: [x.iloc[0] if x.iloc[0] else 0] + [0] * (len(x) - 1))
+df_user_activity_log['Check info'].fillna(0,inplace=True)
+df_user_activity_log['User ID'].fillna(0,inplace=True)
+df_user_activity_log['User ID'] = df_user_activity_log['User ID'].astype('int')
+df_user_activity_log['User ID'] = df_user_activity_log['User ID'].astype(str)
+df_user_activity_log['User ID'].replace('0','',inplace=True)
+
+# df_user_activity_log['User ID'] = df_user_activity_log['User ID'].replace(0,'',inplace=True)
+df_user_activity_log.to_csv(user_transaction_files + '\\user_activity_log.csv',index=False)
 
 # output user distinct activity log
 with open(user_transaction_files + '\\user_distinct_activity_log' + '.csv', 'w', newline='', encoding='utf-8') as file:
@@ -674,11 +824,11 @@ logger.info("user_distinct_activity_log csv file is created")
 with open(user_transaction_files + '\\user_account_data' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
-        ['Company ID', 'Company Name', 'Registered Date', 'User ID', 'User Name', 'IS BRS User', 'Update Date'])
+        ['Company ID', 'Company Name', 'Registered Date', 'User ID', 'User Name', 'IS BRS User', 'Start Date of Use','Last Login Date','Update Date'])
     for user_account_data in user_account_datas:
         writer.writerow(
             [user_account_data[0], user_account_data[1], user_account_data[2], user_account_data[3],
-             user_account_data[4], user_account_data[5], running_date])
+             user_account_data[4], user_account_data[5], user_account_data[6],user_account_data[7],running_date])
 logger.info("user_account_data csv file is created")
 
 # output user account total count
@@ -779,8 +929,35 @@ with open(user_transaction_files + '\pipe_daily_info' + '.csv', 'w', newline='',
         )
 logger.info("pipe_segment_daily_info csv file was created.")
 
+# Output company area master
+with open(user_transaction_files + '\\company_area_master' + '.csv','w',newline='',encoding='utf-8') as  file:
+    writer = csv.writer(file)
+    writer.writerow(
+        ['Company ID','Company Name','Plant Area ID','Plant Area Name']
+    )
+    for q_company_area_master_info in q_company_area_master_infos:
+        writer.writerow(
+            [q_company_area_master_info[0],q_company_area_master_info[1],q_company_area_master_info[2],q_company_area_master_info[3]]
+        )
+logger.info("company_area_master csv file is created.")
+
+
 # get object daily info and Output asset export daily info
-for object,object_sql in object_queries.items():
+# _object_daily_info[0].decode() means change byte file into string format
+for object,object_sql in object_area_queries.items():
+    object_query_daily_info = read_query(conn,object_sql)
+    with open(user_transaction_files + '\\'+object+'.csv','w',newline='',encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Plant Area ID','Date',object])
+        for _object_daily_info in object_query_daily_info:
+            writer.writerow(
+                [_object_daily_info[0].decode(), _object_daily_info[1], _object_daily_info[2]]
+            )
+    logger.info(object+" csv file was created.")
+
+
+# _object_daily_info[0].decode() means change byte file into string format
+for object,object_sql in object_company_queries.items():
     object_query_daily_info = read_query(conn,object_sql)
     with open(user_transaction_files + '\\'+object+'.csv','w',newline='',encoding='utf-8') as file:
         writer = csv.writer(file)
@@ -793,7 +970,7 @@ for object,object_sql in object_queries.items():
 
 
 
-# load
+# load csv to dataframe
 logger.info("Loading each csv files...")
 company_areas_daily_csv_info = pd.read_csv(user_transaction_files + '\company_areas_daily_info.csv')
 markers_daily_info = pd.read_csv(user_transaction_files + '\marker_daily_info.csv')
@@ -801,14 +978,88 @@ machines_daily_info = pd.read_csv(user_transaction_files + '\machine_daily_info.
 measurement_daily_info = pd.read_csv(user_transaction_files + '\measurement_daily_info.csv')
 simulation_daily_info = pd.read_csv(user_transaction_files + '\simulation_daily_info.csv')
 pipe_daily_info = pd.read_csv(user_transaction_files + '\pipe_daily_info.csv')
+# load area object export and import csv to dataframe
+export_asset_data_info = pd.read_csv(user_transaction_files + '\export_asset_data.csv')
+import_asset_data_info = pd.read_csv(user_transaction_files + '\import_asset_data.csv')
+export_tag_info = pd.read_csv(user_transaction_files + '\export_tag.csv')
+import_tag_info = pd.read_csv(user_transaction_files + '\import_tag.csv')
+export_marker_info = pd.read_csv(user_transaction_files + '\export_marker.csv')
+import_marker_info = pd.read_csv(user_transaction_files + '\import_marker.csv')
+export_measure_length_info = pd.read_csv(user_transaction_files + '\export_measure_length.csv')
+import_measure_length_info = pd.read_csv(user_transaction_files + '\import_measure_length.csv')
+export_object_info = pd.read_csv(user_transaction_files + '\export_object.csv')
+import_object_info = pd.read_csv(user_transaction_files + '\import_object.csv')
+export_pipe_group_xlsx_info = pd.read_csv(user_transaction_files + '\export_pipe_group_xlsx.csv')
+import_pipe_group_xlsx_info = pd.read_csv(user_transaction_files + '\import_pipe_group_xlsx.csv')
+export_pipe_group_document_xlsx_info = pd.read_csv(user_transaction_files + '\export_pipe_group_document_xlsx.csv')
+import_pipe_group_document_xlsx_info = pd.read_csv(user_transaction_files + '\import_pipe_group_document_xlsx.csv')
+export_pipe_group_work_xlsx_info = pd.read_csv(user_transaction_files + '\export_pipe_group_work_xlsx.csv')
+import_pipe_group_work_xlsx_info = pd.read_csv(user_transaction_files + '\import_pipe_group_work_xlsx.csv')
+export_asset_work_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_work_xlsx.csv')
+import_asset_work_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_work_xlsx.csv')
+export_asset_document_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_document_xlsx.csv')
+import_asset_document_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_document_xlsx.csv')
+# load company object export and import csv to dataframe
+export_asset_category_info = pd.read_csv(user_transaction_files + '\export_asset_category.csv')
+import_asset_category_info = pd.read_csv(user_transaction_files + '\import_asset_category.csv')
+export_asset_document_main_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_document_main_category_xlsx.csv')
+import_asset_document_main_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_document_main_category_xlsx.csv')
+export_asset_document_sub_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_document_sub_category_xlsx.csv')
+import_asset_document_sub_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_document_sub_category_xlsx.csv')
+export_asset_regulation_info = pd.read_csv(user_transaction_files + '\export_asset_regulation.csv')
+import_asset_regulation_info = pd.read_csv(user_transaction_files + '\import_asset_regulation.csv')
+export_asset_work_large_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_work_large_category_xlsx.csv')
+import_asset_work_large_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_work_large_category_xlsx.csv')
+export_asset_work_middle_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_work_middle_category_xlsx.csv')
+import_asset_work_middle_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_work_middle_category_xlsx.csv')
+export_asset_work_small_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_work_small_category_xlsx.csv')
+import_asset_work_small_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_work_small_category_xlsx.csv')
 
-# merge
+
+# merge object info
 cad = company_areas_daily_csv_info.iloc[:, :5]
 cad = pd.merge(cad, markers_daily_info, on=["Plant Area ID", "Date"], how="left")
 cad = pd.merge(cad, machines_daily_info, on=["Plant Area ID", "Date"], how="left")
 cad = pd.merge(cad, measurement_daily_info, on=["Plant Area ID", "Date"], how="left")
 cad = pd.merge(cad, simulation_daily_info, on=["Plant Area ID", "Date"], how="left")
 cad = pd.merge(cad, pipe_daily_info, on=["Plant Area ID", "Date"], how="left")
+# merge area object import and export info based on area
+cad = pd.merge(cad,export_asset_data_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_data_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_tag_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_tag_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_marker_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_marker_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_measure_length_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_measure_length_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_object_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_object_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_pipe_group_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_pipe_group_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_pipe_group_document_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_pipe_group_document_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_pipe_group_work_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_pipe_group_work_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_asset_work_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_work_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_asset_document_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_document_xlsx_info,on=["Plant Area ID","Date"],how="left")
+# merge company object import and export info based on area
+cad = pd.merge(cad,export_asset_category_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_category_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_asset_document_main_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_document_main_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_asset_document_sub_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_document_sub_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_asset_regulation_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_regulation_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_asset_work_large_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_work_large_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_asset_work_middle_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_work_middle_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,export_asset_work_small_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad,import_asset_work_small_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
+
 
 # change columns order
 new_column_order = ['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name',
@@ -817,9 +1068,36 @@ new_column_order = ['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area N
                     'Marker Daily Updated', 'Machine Daily Updated', 'Measurement Daily Updated',
                     'Simulation Daily Updated',
                     'PipeNavi Daily Updated', 'Marker Daily Deleted', 'Machine Daily Deleted',
-                    'Measurement Daily Deleted', 'Simulation Dialy Deleted', 'PipeNavi Daily Deleted']
+                    'Measurement Daily Deleted', 'Simulation Dialy Deleted', 'PipeNavi Daily Deleted',
+                    'export_marker','import_marker','export_measure_length','import_measure_length','export_object',
+                    'import_object','export_asset_data','import_asset_data','export_pipe_group_xlsx','import_pipe_group_xlsx',
+                    'export_asset_regulation','import_asset_regulation','export_asset_category','import_asset_category','export_asset_document_xlsx',
+                    'import_asset_document_xlsx','export_pipe_group_document_xlsx','import_pipe_group_document_xlsx','export_asset_document_main_category_xlsx','import_asset_document_main_category_xlsx',
+                    'export_asset_document_sub_category_xlsx','import_asset_document_sub_category_xlsx','export_tag','import_tag','export_asset_work_xlsx','import_asset_work_xlsx','export_pipe_group_work_xlsx',
+                    'import_pipe_group_work_xlsx','export_asset_work_large_category_xlsx','import_asset_work_large_category_xlsx','export_asset_work_middle_category_xlsx','import_asset_work_middle_category_xlsx',
+                    'export_asset_work_small_category_xlsx','import_asset_work_small_category_xlsx'
+                    ]
+
+# Loop through the list starting from the 6th element to the last and fillna(0)
+for value in new_column_order[5:]:
+    cad[value] = cad[value].fillna(0)
+
 
 cad = cad.reindex(columns=new_column_order)
+
+# Rename object export and import columns' name
+cad.rename(
+    columns={"export_marker":"Marker Daily Exported","import_marker":"Marker Daily Imported","export_measure_length":"Measurement Daily Exported","import_measure_length":"Measurement Daily Imported","export_object":"Simulation Daily Exported","import_object":"Simulation Daily Imported",
+             "export_asset_data":"Machine Daily Exported","import_asset_data":"Machine Daily Imported","export_pipe_group_xlsx":"Pipe Daily Exported","import_pipe_group_xlsx":"Pipe Daily Imported","export_asset_regulation":"Regulations Daily Exported","import_asset_regulation":"Regulations Daily Imported",
+             "export_asset_category":"Machine Category Daily Exported","import_asset_category":"Machine Category Daily Imported","export_asset_document_xlsx":"Books Daily Exported","import_asset_document_xlsx":"Books Daily Imported","export_pipe_group_document_xlsx":"Books_pipe Daily Exported",
+             "import_pipe_group_document_xlsx":"Books_pipe Daily Imported","export_asset_document_main_category_xlsx":"Books_main_category Daily Exported","import_asset_document_main_category_xlsx":"Books_main_category Daily Imported","export_asset_document_sub_category_xlsx":"Books_sub_category Daily Exported","import_asset_document_sub_category_xlsx":"Books_sub_category Daily Imported",
+             "export_tag":"Tag Daily Exported","import_tag":"Tag Dialy Imported","export_asset_work_xlsx":"History Planning Daily Exported","import_asset_work_xlsx":"History Planning Daily Imported","export_pipe_group_work_xlsx":"History Planning_pipe Daily Exported",
+             "import_pipe_group_work_xlsx":"History Planning_pipe Daily Imported","export_asset_work_large_category_xlsx":"History Planning_large_category Daily Exported","import_asset_work_large_category_xlsx":"History Planning_large_category Daily Imported","export_asset_work_middle_category_xlsx":"History Planning_Medium_category Daily Exported","import_asset_work_middle_category_xlsx":"History Planning_Medium_category Daily Imported",
+            "export_asset_work_small_category_xlsx":"History Planning_Small_category Daily Exported","import_asset_work_small_category_xlsx":"History Planning_Small_category Daily Imported"
+             },
+    inplace=True
+)
+
 # output
 cad.to_csv(user_transaction_files + '\daily_object_transaction_data' + '.csv', encoding="utf-8", index=False)
 logger.info("daily_object_transaction_data csv file is created.")
