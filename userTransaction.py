@@ -396,7 +396,7 @@ SELECT
     '' AS user_name
 FROM
     plant_master AS pm
-    LEFT OUTER JOIN {db}.pipe_segments AS ps
+    LEFT OUTER JOIN {db}.pipe_groups AS ps
         ON pm.plant_area_id = ps.plant_area_id
 WHERE
     ps.id IS NOT NULL
