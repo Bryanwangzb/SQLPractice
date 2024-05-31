@@ -558,7 +558,7 @@ FROM
   LEFT OUTER JOIN company_users AS cu 
         ON a.company_user_id = cu.id 
 WHERE
-    DATE (a.created_at) BETWEEN ('2024/05/31' - INTERVAL 1 YEAR) AND '2024/05/31'
+    DATE (a.created_at) BETWEEN ('{latest_date}' - INTERVAL 1 YEAR) AND '{latest_date}'
     AND (cu.email NOT LIKE '%@brownreverse%' OR cu.email IS NULL)
 GROUP BY
     a.plant_area_id,
@@ -569,87 +569,94 @@ ORDER BY
 '''
 
 # measure length daily info
+# modified due to platform added
 q_measurement_length_info = f'''
 SELECT
-    ml.plant_area_id
-    , date (ml.created_at)
-    , count(*) AS measurement_lengths_daily_amount
-    , COUNT( 
-        CASE 
-            WHEN ml.created_at <> ml.updated_at 
-            and ml.deleted_at is null 
-                THEN 1 
-            END
-    ) as measurement_lengths_daily_updated_amount
-    , COUNT(CASE WHEN ml.deleted_at IS NOT NULL THEN 1 END) as measure_lengths_daily_deleted_amount 
+    ml.plant_area_id,
+    DATE (ml.created_at),
+    COUNT(CASE WHEN ml.platform IS NULL THEN 1 END) AS measurement_lengths_daily_amount_unknown,
+    COUNT(CASE WHEN ml.platform =  '1' THEN 1 END) AS measurement_lengths_daily_amount_web,
+    COUNT(CASE WHEN ml.platform =  '2' THEN 1 END) AS measurement_lengths_daily_amount_ios,
+    COUNT(CASE WHEN ml.created_at <> ml.updated_at AND ml.deleted_at IS NULL AND ml.platform IS NULL THEN 1 END) AS measurement_lengths_daily_updated_amount_unknown,
+    COUNT(CASE WHEN ml.created_at <> ml.updated_at AND ml.deleted_at IS NULL AND ml.platform = '1' THEN 1 END) AS measurement_lengths_daily_updated_amount_web,
+    COUNT(CASE WHEN ml.created_at <> ml.updated_at AND ml.deleted_at IS NULL AND ml.platform = '2' THEN 1 END) AS measurement_lengths_daily_updated_amount_ios,
+    COUNT(CASE WHEN ml.deleted_at IS NOT NULL AND ml.platform IS NULL THEN 1 END) AS measure_lengths_daily_deleted_amount_unknown,
+    COUNT(CASE WHEN ml.deleted_at IS NOT NULL AND ml.platform = '1' THEN 1 END) AS measure_lengths_daily_deleted_amount_web,
+    COUNT(CASE WHEN ml.deleted_at IS NOT NULL AND ml.platform = '2' THEN 1 END) AS measure_lengths_daily_deleted_amount_ios
 FROM
-    {db}.measure_lengths AS ml
+    measure_lengths AS ml
 LEFT OUTER JOIN
-    {db}.company_users as cu
+    company_users AS cu
 ON
     ml.company_user_id = cu.id
 WHERE
-    DATE (ml.created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+    DATE (ml.created_at) BETWEEN '{latest_date}' - INTERVAL 1 YEAR AND '{latest_date}'
 AND
-    cu.email not like '%@brownreverse%'
+    cu.email NOT LIKE '%@brownreverse%'
 GROUP BY
-    ml.plant_area_id
-    , date (ml.created_at) 
+    ml.plant_area_id,DATE (ml.created_at)
+ORDER BY
+    ml.plant_area_id, DATE(ml.created_at)
 '''
 
 # simulation daily info
 q_simulation_daily_info = f'''
 SELECT
-    pao.plant_area_id
-    , date (pao.created_at)
-    , count(*) AS simulation_daily_amount
-    , COUNT( 
-        CASE 
-            WHEN pao.created_at <> pao.updated_at 
-            and pao.deleted_at is null 
-                THEN 1 
-            END
-    ) as simulation_daily_updated_amount
-    , COUNT(CASE WHEN pao.deleted_at IS NOT NULL THEN 1 END) as simulation_daily_deleted_amount 
+    pao.plant_area_id,
+    DATE (pao.created_at),
+    COUNT(CASE WHEN pao.platform IS NULL THEN 1 END) AS simulation_daily_amount_unknown,
+    COUNT(CASE WHEN pao.platform = '1' THEN 1 END) AS simulation_daily_amount_web,
+    COUNT(CASE WHEN pao.platform ='2' THEN 1 END) AS simulation_daily_amount_ios,
+    COUNT(CASE WHEN pao.created_at <> pao.updated_at AND pao.deleted_at IS NULL AND pao.platform IS NULL THEN 1 END) AS simulation_daily_updated_amount,
+    COUNT(CASE WHEN pao.created_at <> pao.updated_at AND pao.deleted_at IS NULL AND pao.platform ='1' THEN 1 END) AS simulation_daily_updated_amount_web,
+    COUNT(CASE WHEN pao.created_at <> pao.updated_at AND pao.deleted_at IS NULL AND pao.platform ='2' THEN 1 END) AS simulation_daily_updated_amount_ios,
+    COUNT(CASE WHEN pao.deleted_at IS NOT NULL AND pao.platform IS NULL THEN 1 END) AS simulation_daily_deleted_amount_unknown,
+    COUNT(CASE WHEN pao.deleted_at IS NOT NULL AND pao.platform ='1' THEN 1 END) AS simulation_daily_deleted_amount_web,
+    COUNT(CASE WHEN pao.deleted_at IS NOT NULL AND pao.platform = '2' IS NULL THEN 1 END) AS simulation_daily_deleted_amount_ios
 FROM
-    {db}.plant_area_objects  as pao
+    plant_area_objects  AS pao
 LEFT OUTER JOIN
-    {db}.company_users as cu
+    company_users AS cu
 ON
     pao.company_user_id = cu.id
 WHERE
-    DATE (pao.created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+    DATE (pao.created_at) BETWEEN '{latest_date}' - INTERVAL 1 YEAR AND '{latest_date}'
 AND
-    cu.email not like '%@brownreverse%'
+    cu.email NOT LIKE '%@brownreverse%'
 GROUP BY
-    pao.plant_area_id
-    , date (pao.created_at) 
+    pao.plant_area_id,DATE (pao.created_at) 
 ORDER BY
-    pao.plant_area_id
+    pao.plant_area_id,DATE(pao.created_at)
 '''
 
 # pipenavi daily info
 q_pipe_daily_info = f'''
 SELECT
-    plant_area_id
-    , date (created_at)
-    , count(*) AS pipe_segment_daily_amount
-    , COUNT( 
-        CASE 
-            WHEN created_at <> updated_at 
-            and deleted_at is null 
-                THEN 1 
-            END
-    ) as pipe_segment_daily_updated_amount
-    , COUNT(CASE WHEN deleted_at IS NOT NULL THEN 1 END) as pipe_segment_daily_deleted_amount 
+    pg.plant_area_id,
+    DATE (pg.created_at),
+    COUNT(CASE WHEN pg.platform IS NULL THEN 1 END) AS pipe_group_daily_amount_unknown,
+    COUNT(CASE WHEN pg.platform = '1' THEN 1 END) AS pipe_group_daily_amount_web,
+    COUNT(CASE WHEN pg.platform = '2' THEN 1 END) AS pipe_group_daily_amount_ios,
+    COUNT(CASE WHEN pg.created_at <> pg.updated_at AND pg.deleted_at IS NULL AND pg.platform IS NULL THEN 1 END) AS pipe_group_daily_updated_amount_unknown,
+    COUNT(CASE WHEN pg.created_at <> pg.updated_at AND pg.deleted_at IS NULL AND pg.platform ='1' THEN 1 END) AS pipe_group_daily_updated_amount_web,
+    COUNT(CASE WHEN pg.created_at <> pg.updated_at AND pg.deleted_at IS NULL AND pg.platform = '2' THEN 1 END) AS pipe_group_daily_updated_amount_ios,
+    COUNT(CASE WHEN deleted_at IS NOT NULL AND pg.platform IS NULL THEN 1 END) AS pipe_group_daily_deleted_amount_unknown,
+    COUNT(CASE WHEN deleted_at IS NOT NULL AND pg.platform='1' THEN 1 END) AS pipe_group_daily_deleted_amount_web,
+    COUNT(CASE WHEN deleted_at IS NOT NULL AND pg.platform='2' THEN 1 END) AS pipe_group_daily_deleted_amount_ios
 FROM
-    {db}.pipe_groups
+    pipe_groups AS pg
+LEFT OUTER JOIN
+    company_users AS cu
+ON
+    pg.company_user_id = cu.id
 WHERE
-    DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+    DATE (pg.created_at) BETWEEN '{latest_date}' - INTERVAL 1 YEAR AND '{latest_date}'
+AND
+    (cu.email NOT LIKE '%@brownreverse%' OR cu.email IS NULL)
 GROUP BY
-    plant_area_id
-    , date (created_at) 
-
+    pg.plant_area_id,DATE (pg.created_at) 
+ORDER BY
+    pg.plant_area_id,DATE (pg.created_at) 
 '''
 
 # company_area_master
@@ -935,24 +942,33 @@ logger.info("machine_daily_info csv file was created.")
 # Output measure length daily info
 with open(user_transaction_files + '\measurement_daily_info' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow(['Plant Area ID', 'Date', 'Measurement Daily Registered', 'Measurement Daily Updated',
-                     'Measurement Daily Deleted'])
+    writer.writerow(
+        ['Plant Area ID', 'Date', 'Measurement Daily Registered Unknown', 'Measurement Daily Registered Web',
+         'Measurement Daily Registered iOS', 'Measurement Daily Updated Unknown', 'Measurement Daily Updated Web',
+         'Measurement Daily Updated iOS',
+         'Measurement Daily Deleted Unknown', 'Measurement Daily Deleted Web', 'Measurement Daily Deleted iOS'])
     for _measurement_daily_info in measurement_daily_info:
         writer.writerow(
             [_measurement_daily_info[0], _measurement_daily_info[1], _measurement_daily_info[2],
-             _measurement_daily_info[3], _measurement_daily_info[4]]
+             _measurement_daily_info[3], _measurement_daily_info[4], _measurement_daily_info[5],
+             _measurement_daily_info[6], _measurement_daily_info[7], _measurement_daily_info[8],
+             _measurement_daily_info[9], _measurement_daily_info[10]]
         )
 logger.info("measurement_length_daily_info csv file was created.")
 
 # Output simulation daily info
 with open(user_transaction_files + '\simulation_daily_info' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow(['Plant Area ID', 'Date', 'Simulation Daily Registered', 'Simulation Daily Updated',
-                     'Simulation Dialy Deleted'])
+    writer.writerow(['Plant Area ID', 'Date', 'Simulation Daily Registered Unknown', 'Simulation Daily Registered Web',
+                     'Simulation Daily Registered iOS',
+                     'Simulation Daily Updated Unknown', 'Simulation Daily Updated Web', 'Simulation Daily Updated iOS',
+                     'Simulation Dialy Deleted Unknown', 'Simulation Dialy Deleted Web',
+                     'Simulation Dialy Deleted iOS'])
     for _simulation_daily_info in simulation_daily_info:
         writer.writerow(
             [_simulation_daily_info[0], _simulation_daily_info[1], _simulation_daily_info[2], _simulation_daily_info[3],
-             _simulation_daily_info[4]]
+             _simulation_daily_info[4], _simulation_daily_info[5], _simulation_daily_info[6], _simulation_daily_info[7],
+             _simulation_daily_info[8], _simulation_daily_info[9], _simulation_daily_info[10]]
         )
 logger.info("simulation_daily_info csv file was created.")
 
@@ -960,11 +976,15 @@ logger.info("simulation_daily_info csv file was created.")
 with open(user_transaction_files + '\pipe_daily_info' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
-        ['Plant Area ID', 'Date', 'PipeNavi Daily Registered', 'PipeNavi Daily Updated', 'PipeNavi Daily Deleted'])
+        ['Plant Area ID', 'Date', 'PipeNavi Daily Registered Unknown', 'PipeNavi Daily Registered Web', 'PipeNavi Daily Registered iOS',
+         'PipeNavi Daily Updated Unknown', 'PipeNavi Daily Updated Web', 'PipeNavi Daily Updated iOS',
+         'PipeNavi Daily Deleted Unknown','PipeNavi Daily Deleted Web','PipeNavi Daily Deleted iOS'])
     for _pipe_daily_info in pipe_daily_info:
         writer.writerow(
             [_pipe_daily_info[0], _pipe_daily_info[1], int(_pipe_daily_info[2]), int(_pipe_daily_info[3]),
-             int(_pipe_daily_info[4])]
+             int(_pipe_daily_info[4]),int(_pipe_daily_info[5]),int(_pipe_daily_info[6]),
+             int(_pipe_daily_info[7]),int(_pipe_daily_info[8]),int(_pipe_daily_info[9]),
+             int(_pipe_daily_info[10])]
         )
 logger.info("pipe_segment_daily_info csv file was created.")
 
@@ -1109,18 +1129,25 @@ cad = pd.merge(cad, import_asset_work_small_category_xlsx_info, on=["Plant Area 
 new_column_order = ['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name',
                     'Date', 'Marker Daily Registered Unknown', 'Marker Daily Registered Web',
                     'Marker Daily Registered iOS', 'Machine Daily Registered Unknown', 'Machine Daily Registered Web',
-                    'Machine Daily Registered iOS', 'Measurement Daily Registered',
-                    'Simulation Daily Registered', 'PipeNavi Daily Registered',
+                    'Machine Daily Registered iOS', 'Measurement Daily Registered Unknown',
+                    'Measurement Daily Registered Web', 'Measurement Daily Registered iOS',
+                    'Simulation Daily Registered Unknown',  'Simulation Daily Registered Web',  'Simulation Daily Registered iOS',
+                    'PipeNavi Daily Registered Unknown','PipeNavi Daily Registered Web','PipeNavi Daily Registered iOS',
                     'Machine Location Daily Registered Unknown', 'Machine Location Daily Registered Web',
                     'Machine Location Daily Registered iOS',
                     'Marker Daily Updated Unknown', 'Marker Daily Updated Web', 'Marker Daily Updated iOS',
                     'Machine Daily Updated Unknown', 'Machine Daily Updated Web', 'Machine Daily Updated iOS',
-                    'Measurement Daily Updated',
-                    'Simulation Daily Updated',
-                    'PipeNavi Daily Updated', 'Marker Daily Deleted Unknown', 'Marker Daily Deleted Web',
+                    'Measurement Daily Updated Unknown', 'Measurement Daily Updated Web',
+                    'Measurement Daily Updated iOS',
+                    'Simulation Daily Updated Unknown','Simulation Daily Updated Web','Simulation Daily Updated iOS',
+                    'PipeNavi Daily Updated Unknown',   'PipeNavi Daily Updated Web',   'PipeNavi Daily Updated iOS',
+                    'Marker Daily Deleted Unknown', 'Marker Daily Deleted Web',
                     'Marker Daily Deleted iOS', 'Machine Daily Deleted Unknown', 'Machine Daily Deleted Web',
                     'Machine Daily Deleted iOS',
-                    'Measurement Daily Deleted', 'Simulation Dialy Deleted', 'PipeNavi Daily Deleted',
+                    'Measurement Daily Deleted Unknown', 'Measurement Daily Deleted Web',
+                    'Measurement Daily Deleted iOS',
+                    'Simulation Dialy Deleted Unknown',  'Simulation Dialy Deleted Web',  'Simulation Dialy Deleted iOS',
+                    'PipeNavi Daily Deleted unknown', 'PipeNavi Daily Deleted Web', 'PipeNavi Daily Deleted iOS',
                     'export_marker', 'import_marker', 'export_measure_length', 'import_measure_length', 'export_object',
                     'import_object', 'export_asset_data', 'import_asset_data', 'export_pipe_group_xlsx',
                     'import_pipe_group_xlsx',
