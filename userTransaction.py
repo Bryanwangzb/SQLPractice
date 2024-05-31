@@ -1,3 +1,12 @@
+"""
+Title: Data Process Script
+Description: This script processes raw data and creates csv files.
+Author: WangZhibin
+Date Created: 2024-05-30
+Last Modified: 2024-04-30
+Version: 1.0
+"""
+
 # MySQLdbのインポート
 import csv
 import datetime
@@ -497,49 +506,66 @@ WITH RECURSIVE DateRange AS (
         , dr.daily_date ASC
 '''
 # markers daily info
+# modified due to platform added
 q_marker_daily_info = f'''
 SELECT
-    m.plant_area_id
-    , date (m.created_at)
-    , COUNT(*) AS marker_daily_amount
-    , COUNT( 
-        CASE 
-            WHEN m.created_at <> m.updated_at 
-            and m.deleted_at is null 
-                THEN 1 
-            END
-    ) as marker_daily_updated_amount
-    , COUNT(CASE WHEN m.deleted_at IS NOT NULL THEN 1 END) as marker_daily_deleted_amount 
+    m.plant_area_id,
+    DATE(m.created_at) AS created_date,
+    COUNT(CASE WHEN m.platform IS NULL THEN 1 END) AS marker_daily_amount_unknown,
+    COUNT(CASE WHEN m.platform = '1' THEN 1 END) AS marker_daily_amount_web,
+    COUNT(CASE WHEN m.platform = '2' THEN 1 END) AS marker_daily_amount_ios,
+    COUNT(CASE WHEN m.created_at <> m.updated_at AND m.platform IS NULL AND m.deleted_at IS NULL THEN 1 END) AS marker_daily_updated_amount_unknown,
+    COUNT(CASE WHEN m.created_at <> m.updated_at AND m.platform = '1' AND m.deleted_at IS NULL THEN 1 END) AS marker_daily_updated_amount_web,
+    COUNT(CASE WHEN m.created_at <> m.updated_at AND m.platform = '2' AND m.deleted_at IS NULL THEN 1 END) AS marker_daily_updated_amount_ios,
+    COUNT(CASE WHEN m.deleted_at IS NOT NULL AND m.platform IS NULL THEN 1 END) AS marker_daily_deleted_amount_unknown,
+    COUNT(CASE WHEN m.deleted_at IS NOT NULL AND m.platform = '1' THEN 1 END) AS marker_daily_deleted_amount_web,
+    COUNT(CASE WHEN m.deleted_at IS NOT NULL AND m.platform = '2' THEN 1 END) AS marker_daily_deleted_amount_ios
 FROM
     markers AS m
-LEFT OUTER JOIN
-    {db}.company_users as cu
-ON
-    m.company_user_id = cu.id    
+    LEFT OUTER JOIN company_users AS cu 
+        ON m.company_user_id = cu.id 
 WHERE
-    DATE (m.created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
-AND
-    cu.email not like '%@brownreverse%'
+    DATE(m.created_at) BETWEEN DATE_SUB('{latest_date}', INTERVAL 1 YEAR) AND '{latest_date}'
+    AND cu.email NOT LIKE '%@brownreverse%' 
 GROUP BY
-    m.plant_area_id
-    , date (m.created_at)
+    m.plant_area_id,
+    DATE(m.created_at)
+ORDER BY
+    m.plant_area_id,
+    DATE(m.created_at);
 '''
 
 # machine daily info
+# modified due to platform added
 q_machine_daily_info = f'''
 SELECT
-    plant_area_id
-    , date(created_at)
-    , count(*) AS machine_daily_amount 
-    ,COUNT(CASE WHEN created_at <> updated_at THEN 1 END) as  machine_daily_updated_amount
-    ,COUNT(CASE WHEN position_x is not null then 1 END) as machine_location_daily_amount
-    ,'' as machine_daily_deleted_amount
+    a.plant_area_id,
+    DATE(a.created_at) AS created_date,
+    COUNT(CASE WHEN a.platform IS NULL THEN 1 END) AS machine_daily_amount_unknown,
+    COUNT(CASE WHEN a.platform = '1' THEN 1 END) AS machine_daily_amount_web,
+    COUNT(CASE WHEN a.platform = '2' THEN 1 END) AS machine_daily_amount_ios,
+    COUNT(CASE WHEN a.created_at <> a.updated_at AND a.platform IS NULL THEN 1 END) AS  machine_daily_updated_amount_unknown,
+    COUNT(CASE WHEN a.created_at <> a.updated_at AND a.platform='1' THEN 1 END) AS  machine_daily_updated_amount_web,
+    COUNT(CASE WHEN a.created_at <> a.updated_at AND a.platform='2' THEN 1 END) AS  machine_daily_updated_amount_ios,
+    COUNT(CASE WHEN position_x IS NOT NULL AND a.platform IS NULL THEN 1 END) AS machine_location_daily_amount_unknown,
+    COUNT(CASE WHEN position_x IS NOT NULL AND a.platform='1' THEN 1 END) AS machine_location_daily_amount_web,
+    COUNT(CASE WHEN position_x IS NOT NULL AND a.platform='2' THEN 1 END) AS machine_location_daily_amount_ios,
+    '' AS machine_daily_deleted_amount_unknown,
+    '' AS machine_daily_deleted_amount_web,
+    '' AS machine_daily_deleted_amount_ios
 FROM
-    assets 
+    assets AS a
+  LEFT OUTER JOIN company_users AS cu 
+        ON a.company_user_id = cu.id 
 WHERE
-    DATE (created_at) BETWEEN '{running_date}' - INTERVAL 1 YEAR AND '{running_date}'
+    DATE (a.created_at) BETWEEN ('2024/05/31' - INTERVAL 1 YEAR) AND '2024/05/31'
+    AND (cu.email NOT LIKE '%@brownreverse%' OR cu.email IS NULL)
 GROUP BY
-    plant_area_id,date(created_at)
+    a.plant_area_id,
+    DATE(a.created_at)
+ORDER BY 
+    a.plant_area_id,
+    DATE(a.created_at)
 '''
 
 # measure length daily info
@@ -641,6 +667,7 @@ FROM
         ON pla.id = pa.plant_id
 '''
 
+
 # Generate sql for objects' import and export based on area.
 def object_import_export_area(table_url_csv):
     import_export_sql = f"""
@@ -665,16 +692,17 @@ def object_import_export_area(table_url_csv):
     """
 
     sql_queries = {}
-    with open(table_url_csv, 'r',encoding='utf-8') as file:
+    with open(table_url_csv, 'r', encoding='utf-8') as file:
         reader = csv.reader(file)
         for row in reader:
             if row:
                 url = row[0]
                 count_alias = url.split('/')[-1]
-                sql_query=import_export_sql % (count_alias,running_date,running_date,url)
+                sql_query = import_export_sql % (count_alias, running_date, running_date, url)
                 sql_queries[count_alias] = sql_query
 
     return sql_queries
+
 
 # Generate sql for objects' import and export based on company.
 def object_import_export_company(table_url_csv):
@@ -721,13 +749,13 @@ def object_import_export_company(table_url_csv):
     """
 
     sql_queries = {}
-    with open(table_url_csv, 'r',encoding='utf-8') as file:
+    with open(table_url_csv, 'r', encoding='utf-8') as file:
         reader = csv.reader(file)
         for row in reader:
             if row:
                 url = row[0]
                 count_alias = url.split('/')[-1]
-                sql_query=import_export_sql % (count_alias,running_date,running_date,url)
+                sql_query = import_export_sql % (count_alias, running_date, running_date, url)
                 sql_queries[count_alias] = sql_query
 
     return sql_queries
@@ -778,8 +806,7 @@ simulation_daily_info = read_query(conn, q_simulation_daily_info)
 pipe_daily_info = read_query(conn, q_pipe_daily_info)
 
 # get company area info
-q_company_area_master_infos = read_query(conn,q_company_area_master_infos)
-
+q_company_area_master_infos = read_query(conn, q_company_area_master_infos)
 
 # get objects' import and output queries list
 object_area_queries = object_import_export_area('object_by_area.csv')
@@ -787,28 +814,28 @@ object_area_queries = object_import_export_area('object_by_area.csv')
 # get objects' import and output queries list
 object_company_queries = object_import_export_company('object_by_company.csv')
 
-
 # output user activity log
 with open(user_transaction_files + '\\user_activity_tmp_log' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow(['User ID', 'Login Date','Access From','Check info'])
+    writer.writerow(['User ID', 'Login Date', 'Access From', 'Check info'])
     for user_activity_result in user_activity_results:
         writer.writerow(
-            [user_activity_result[0], user_activity_result[1],user_activity_result[2],user_activity_result[3]]
+            [user_activity_result[0], user_activity_result[1], user_activity_result[2], user_activity_result[3]]
         )
 logger.info("user_activity_tmp_log csv file is created")
 
 df_user_activity_log = pd.read_csv(user_transaction_files + '\\user_activity_tmp_log.csv')
 # Group by User ID and Login Date, then update 'check info' column
-df_user_activity_log['Check info'] = df_user_activity_log.groupby(['User ID','Login Date'])['Check info'].transform(lambda x: [x.iloc[0] if x.iloc[0] else 0] + [0] * (len(x) - 1))
-df_user_activity_log['Check info'].fillna(0,inplace=True)
-df_user_activity_log['User ID'].fillna(0,inplace=True)
+df_user_activity_log['Check info'] = df_user_activity_log.groupby(['User ID', 'Login Date'])['Check info'].transform(
+    lambda x: [x.iloc[0] if x.iloc[0] else 0] + [0] * (len(x) - 1))
+df_user_activity_log['Check info'].fillna(0, inplace=True)
+df_user_activity_log['User ID'].fillna(0, inplace=True)
 df_user_activity_log['User ID'] = df_user_activity_log['User ID'].astype('int')
 df_user_activity_log['User ID'] = df_user_activity_log['User ID'].astype(str)
-df_user_activity_log['User ID'].replace('0','',inplace=True)
+df_user_activity_log['User ID'].replace('0', '', inplace=True)
 
 # df_user_activity_log['User ID'] = df_user_activity_log['User ID'].replace(0,'',inplace=True)
-df_user_activity_log.to_csv(user_transaction_files + '\\user_activity_log.csv',index=False)
+df_user_activity_log.to_csv(user_transaction_files + '\\user_activity_log.csv', index=False)
 
 # output user distinct activity log
 with open(user_transaction_files + '\\user_distinct_activity_log' + '.csv', 'w', newline='', encoding='utf-8') as file:
@@ -824,11 +851,12 @@ logger.info("user_distinct_activity_log csv file is created")
 with open(user_transaction_files + '\\user_account_data' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
-        ['Company ID', 'Company Name', 'Registered Date', 'User ID', 'User Name', 'IS BRS User', 'Start Date of Use','Last Login Date','Update Date'])
+        ['Company ID', 'Company Name', 'Registered Date', 'User ID', 'User Name', 'IS BRS User', 'Start Date of Use',
+         'Last Login Date', 'Update Date'])
     for user_account_data in user_account_datas:
         writer.writerow(
             [user_account_data[0], user_account_data[1], user_account_data[2], user_account_data[3],
-             user_account_data[4], user_account_data[5], user_account_data[6],user_account_data[7],running_date])
+             user_account_data[4], user_account_data[5], user_account_data[6], user_account_data[7], running_date])
 logger.info("user_account_data csv file is created")
 
 # output user account total count
@@ -873,23 +901,34 @@ logger.info("company_areas_daily_info csv file was created.")
 with open(user_transaction_files + '\marker_daily_info' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
-        ['Plant Area ID', 'Date', 'Marker Daily Registered', 'Marker Daily Updated', 'Marker Daily Deleted'])
+        ['Plant Area ID', 'Date', 'Marker Daily Registered Unknown', 'Marker Daily Registered Web',
+         'Marker Daily Registered iOS', 'Marker Daily Updated Unknown', 'Marker Daily Updated Web',
+         'Marker Daily Updated iOS', 'Marker Daily Deleted Unknown', 'Marker Daily Deleted Web',
+         'Marker Daily Deleted iOS'])
     for _marker_daily_info in marker_daily_info:
         writer.writerow(
             [_marker_daily_info[0], _marker_daily_info[1], _marker_daily_info[2], _marker_daily_info[3],
-             _marker_daily_info[4]]
+             _marker_daily_info[4], _marker_daily_info[5], _marker_daily_info[6],
+             _marker_daily_info[7], _marker_daily_info[8], _marker_daily_info[9],
+             _marker_daily_info[10]]
         )
 logger.info("marker_daily_info csv file was created.")
 
 # output machines daily info
 with open(user_transaction_files + '\machine_daily_info' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow(['Plant Area ID', 'Date', 'Machine Daily Registered', 'Machine Daily Updated',
-                     'Machine Location Daily Registered', 'Machine Daily Deleted'])
+    writer.writerow(['Plant Area ID', 'Date', 'Machine Daily Registered Unknown', 'Machine Daily Registered Web',
+                     'Machine Daily Registered iOS',
+                     'Machine Daily Updated Unknown', 'Machine Daily Updated Web', 'Machine Daily Updated iOS',
+                     'Machine Location Daily Registered Unknown', 'Machine Location Daily Registered Web',
+                     'Machine Location Daily Registered iOS',
+                     'Machine Daily Deleted Unknown', 'Machine Daily Deleted Web', 'Machine Daily Deleted iOS'])
     for _machine_daily_info in machine_daily_info:
         writer.writerow(
             [_machine_daily_info[0], _machine_daily_info[1], _machine_daily_info[2], _machine_daily_info[3],
-             _machine_daily_info[4], _machine_daily_info[5]]
+             _machine_daily_info[4], _machine_daily_info[5], _machine_daily_info[6], _machine_daily_info[7],
+             _machine_daily_info[8], _machine_daily_info[9], _machine_daily_info[10], _machine_daily_info[11],
+             _machine_daily_info[12], _machine_daily_info[13]]
         )
 logger.info("machine_daily_info csv file was created.")
 
@@ -930,45 +969,42 @@ with open(user_transaction_files + '\pipe_daily_info' + '.csv', 'w', newline='',
 logger.info("pipe_segment_daily_info csv file was created.")
 
 # Output company area master
-with open(user_transaction_files + '\\company_area_master' + '.csv','w',newline='',encoding='utf-8') as  file:
+with open(user_transaction_files + '\\company_area_master' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
-        ['Company ID','Company Name','Plant Area ID','Plant Area Name']
+        ['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name']
     )
     for q_company_area_master_info in q_company_area_master_infos:
         writer.writerow(
-            [q_company_area_master_info[0],q_company_area_master_info[1],q_company_area_master_info[2],q_company_area_master_info[3]]
+            [q_company_area_master_info[0], q_company_area_master_info[1], q_company_area_master_info[2],
+             q_company_area_master_info[3]]
         )
 logger.info("company_area_master csv file is created.")
 
-
 # get object daily info and Output asset export daily info
 # _object_daily_info[0].decode() means change byte file into string format
-for object,object_sql in object_area_queries.items():
-    object_query_daily_info = read_query(conn,object_sql)
-    with open(user_transaction_files + '\\'+object+'.csv','w',newline='',encoding='utf-8') as file:
+for object, object_sql in object_area_queries.items():
+    object_query_daily_info = read_query(conn, object_sql)
+    with open(user_transaction_files + '\\' + object + '.csv', 'w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
-        writer.writerow(['Plant Area ID','Date',object])
+        writer.writerow(['Plant Area ID', 'Date', object])
         for _object_daily_info in object_query_daily_info:
             writer.writerow(
                 [_object_daily_info[0].decode(), _object_daily_info[1], _object_daily_info[2]]
             )
-    logger.info(object+" csv file was created.")
-
+    logger.info(object + " csv file was created.")
 
 # _object_daily_info[0].decode() means change byte file into string format
-for object,object_sql in object_company_queries.items():
-    object_query_daily_info = read_query(conn,object_sql)
-    with open(user_transaction_files + '\\'+object+'.csv','w',newline='',encoding='utf-8') as file:
+for object, object_sql in object_company_queries.items():
+    object_query_daily_info = read_query(conn, object_sql)
+    with open(user_transaction_files + '\\' + object + '.csv', 'w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
-        writer.writerow(['Plant Area ID','Date',object])
+        writer.writerow(['Plant Area ID', 'Date', object])
         for _object_daily_info in object_query_daily_info:
             writer.writerow(
                 [_object_daily_info[0], _object_daily_info[1], _object_daily_info[2]]
             )
-    logger.info(object+" csv file was created.")
-
-
+    logger.info(object + " csv file was created.")
 
 # load csv to dataframe
 logger.info("Loading each csv files...")
@@ -1002,19 +1038,28 @@ import_asset_document_xlsx_info = pd.read_csv(user_transaction_files + '\import_
 # load company object export and import csv to dataframe
 export_asset_category_info = pd.read_csv(user_transaction_files + '\export_asset_category.csv')
 import_asset_category_info = pd.read_csv(user_transaction_files + '\import_asset_category.csv')
-export_asset_document_main_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_document_main_category_xlsx.csv')
-import_asset_document_main_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_document_main_category_xlsx.csv')
-export_asset_document_sub_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_document_sub_category_xlsx.csv')
-import_asset_document_sub_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_document_sub_category_xlsx.csv')
+export_asset_document_main_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\export_asset_document_main_category_xlsx.csv')
+import_asset_document_main_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\import_asset_document_main_category_xlsx.csv')
+export_asset_document_sub_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\export_asset_document_sub_category_xlsx.csv')
+import_asset_document_sub_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\import_asset_document_sub_category_xlsx.csv')
 export_asset_regulation_info = pd.read_csv(user_transaction_files + '\export_asset_regulation.csv')
 import_asset_regulation_info = pd.read_csv(user_transaction_files + '\import_asset_regulation.csv')
-export_asset_work_large_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_work_large_category_xlsx.csv')
-import_asset_work_large_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_work_large_category_xlsx.csv')
-export_asset_work_middle_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_work_middle_category_xlsx.csv')
-import_asset_work_middle_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_work_middle_category_xlsx.csv')
-export_asset_work_small_category_xlsx_info = pd.read_csv(user_transaction_files + '\export_asset_work_small_category_xlsx.csv')
-import_asset_work_small_category_xlsx_info = pd.read_csv(user_transaction_files + '\import_asset_work_small_category_xlsx.csv')
-
+export_asset_work_large_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\export_asset_work_large_category_xlsx.csv')
+import_asset_work_large_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\import_asset_work_large_category_xlsx.csv')
+export_asset_work_middle_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\export_asset_work_middle_category_xlsx.csv')
+import_asset_work_middle_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\import_asset_work_middle_category_xlsx.csv')
+export_asset_work_small_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\export_asset_work_small_category_xlsx.csv')
+import_asset_work_small_category_xlsx_info = pd.read_csv(
+    user_transaction_files + '\import_asset_work_small_category_xlsx.csv')
 
 # merge object info
 cad = company_areas_daily_csv_info.iloc[:, :5]
@@ -1024,76 +1069,109 @@ cad = pd.merge(cad, measurement_daily_info, on=["Plant Area ID", "Date"], how="l
 cad = pd.merge(cad, simulation_daily_info, on=["Plant Area ID", "Date"], how="left")
 cad = pd.merge(cad, pipe_daily_info, on=["Plant Area ID", "Date"], how="left")
 # merge area object import and export info based on area
-cad = pd.merge(cad,export_asset_data_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_data_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_tag_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_tag_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_marker_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_marker_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_measure_length_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_measure_length_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_object_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_object_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_pipe_group_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_pipe_group_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_pipe_group_document_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_pipe_group_document_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_pipe_group_work_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_pipe_group_work_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_asset_work_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_work_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_asset_document_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_document_xlsx_info,on=["Plant Area ID","Date"],how="left")
+cad = pd.merge(cad, export_asset_data_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_data_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_tag_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_tag_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_marker_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_marker_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_measure_length_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_measure_length_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_object_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_object_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_pipe_group_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_pipe_group_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_pipe_group_document_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_pipe_group_document_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_pipe_group_work_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_pipe_group_work_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_asset_work_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_work_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_asset_document_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_document_xlsx_info, on=["Plant Area ID", "Date"], how="left")
 # merge company object import and export info based on area
-cad = pd.merge(cad,export_asset_category_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_category_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_asset_document_main_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_document_main_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_asset_document_sub_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_document_sub_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_asset_regulation_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_regulation_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_asset_work_large_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_work_large_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_asset_work_middle_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_work_middle_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,export_asset_work_small_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-cad = pd.merge(cad,import_asset_work_small_category_xlsx_info,on=["Plant Area ID","Date"],how="left")
-
+cad = pd.merge(cad, export_asset_category_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_category_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_asset_document_main_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_document_main_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_asset_document_sub_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_document_sub_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_asset_regulation_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_regulation_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_asset_work_large_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_work_large_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_asset_work_middle_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_work_middle_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, export_asset_work_small_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
+cad = pd.merge(cad, import_asset_work_small_category_xlsx_info, on=["Plant Area ID", "Date"], how="left")
 
 # change columns order
 new_column_order = ['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name',
-                    'Date', 'Marker Daily Registered', 'Machine Daily Registered', 'Measurement Daily Registered',
-                    'Simulation Daily Registered', 'PipeNavi Daily Registered', 'Machine Location Daily Registered',
-                    'Marker Daily Updated', 'Machine Daily Updated', 'Measurement Daily Updated',
+                    'Date', 'Marker Daily Registered Unknown', 'Marker Daily Registered Web',
+                    'Marker Daily Registered iOS', 'Machine Daily Registered Unknown', 'Machine Daily Registered Web',
+                    'Machine Daily Registered iOS', 'Measurement Daily Registered',
+                    'Simulation Daily Registered', 'PipeNavi Daily Registered',
+                    'Machine Location Daily Registered Unknown', 'Machine Location Daily Registered Web',
+                    'Machine Location Daily Registered iOS',
+                    'Marker Daily Updated Unknown', 'Marker Daily Updated Web', 'Marker Daily Updated iOS',
+                    'Machine Daily Updated Unknown', 'Machine Daily Updated Web', 'Machine Daily Updated iOS',
+                    'Measurement Daily Updated',
                     'Simulation Daily Updated',
-                    'PipeNavi Daily Updated', 'Marker Daily Deleted', 'Machine Daily Deleted',
+                    'PipeNavi Daily Updated', 'Marker Daily Deleted Unknown', 'Marker Daily Deleted Web',
+                    'Marker Daily Deleted iOS', 'Machine Daily Deleted Unknown', 'Machine Daily Deleted Web',
+                    'Machine Daily Deleted iOS',
                     'Measurement Daily Deleted', 'Simulation Dialy Deleted', 'PipeNavi Daily Deleted',
-                    'export_marker','import_marker','export_measure_length','import_measure_length','export_object',
-                    'import_object','export_asset_data','import_asset_data','export_pipe_group_xlsx','import_pipe_group_xlsx',
-                    'export_asset_regulation','import_asset_regulation','export_asset_category','import_asset_category','export_asset_document_xlsx',
-                    'import_asset_document_xlsx','export_pipe_group_document_xlsx','import_pipe_group_document_xlsx','export_asset_document_main_category_xlsx','import_asset_document_main_category_xlsx',
-                    'export_asset_document_sub_category_xlsx','import_asset_document_sub_category_xlsx','export_tag','import_tag','export_asset_work_xlsx','import_asset_work_xlsx','export_pipe_group_work_xlsx',
-                    'import_pipe_group_work_xlsx','export_asset_work_large_category_xlsx','import_asset_work_large_category_xlsx','export_asset_work_middle_category_xlsx','import_asset_work_middle_category_xlsx',
-                    'export_asset_work_small_category_xlsx','import_asset_work_small_category_xlsx'
+                    'export_marker', 'import_marker', 'export_measure_length', 'import_measure_length', 'export_object',
+                    'import_object', 'export_asset_data', 'import_asset_data', 'export_pipe_group_xlsx',
+                    'import_pipe_group_xlsx',
+                    'export_asset_regulation', 'import_asset_regulation', 'export_asset_category',
+                    'import_asset_category', 'export_asset_document_xlsx',
+                    'import_asset_document_xlsx', 'export_pipe_group_document_xlsx', 'import_pipe_group_document_xlsx',
+                    'export_asset_document_main_category_xlsx', 'import_asset_document_main_category_xlsx',
+                    'export_asset_document_sub_category_xlsx', 'import_asset_document_sub_category_xlsx', 'export_tag',
+                    'import_tag', 'export_asset_work_xlsx', 'import_asset_work_xlsx', 'export_pipe_group_work_xlsx',
+                    'import_pipe_group_work_xlsx', 'export_asset_work_large_category_xlsx',
+                    'import_asset_work_large_category_xlsx', 'export_asset_work_middle_category_xlsx',
+                    'import_asset_work_middle_category_xlsx',
+                    'export_asset_work_small_category_xlsx', 'import_asset_work_small_category_xlsx'
                     ]
 
 # Loop through the list starting from the 6th element to the last and fillna(0)
 for value in new_column_order[5:]:
     cad[value] = cad[value].fillna(0)
 
-
 cad = cad.reindex(columns=new_column_order)
 
 # Rename object export and import columns' name
 cad.rename(
-    columns={"export_marker":"Marker Daily Exported","import_marker":"Marker Daily Imported","export_measure_length":"Measurement Daily Exported","import_measure_length":"Measurement Daily Imported","export_object":"Simulation Daily Exported","import_object":"Simulation Daily Imported",
-             "export_asset_data":"Machine Daily Exported","import_asset_data":"Machine Daily Imported","export_pipe_group_xlsx":"Pipe Daily Exported","import_pipe_group_xlsx":"Pipe Daily Imported","export_asset_regulation":"Regulations Daily Exported","import_asset_regulation":"Regulations Daily Imported",
-             "export_asset_category":"Machine Category Daily Exported","import_asset_category":"Machine Category Daily Imported","export_asset_document_xlsx":"Books Daily Exported","import_asset_document_xlsx":"Books Daily Imported","export_pipe_group_document_xlsx":"Books_pipe Daily Exported",
-             "import_pipe_group_document_xlsx":"Books_pipe Daily Imported","export_asset_document_main_category_xlsx":"Books_main_category Daily Exported","import_asset_document_main_category_xlsx":"Books_main_category Daily Imported","export_asset_document_sub_category_xlsx":"Books_sub_category Daily Exported","import_asset_document_sub_category_xlsx":"Books_sub_category Daily Imported",
-             "export_tag":"Tag Daily Exported","import_tag":"Tag Dialy Imported","export_asset_work_xlsx":"History Planning Daily Exported","import_asset_work_xlsx":"History Planning Daily Imported","export_pipe_group_work_xlsx":"History Planning_pipe Daily Exported",
-             "import_pipe_group_work_xlsx":"History Planning_pipe Daily Imported","export_asset_work_large_category_xlsx":"History Planning_large_category Daily Exported","import_asset_work_large_category_xlsx":"History Planning_large_category Daily Imported","export_asset_work_middle_category_xlsx":"History Planning_Medium_category Daily Exported","import_asset_work_middle_category_xlsx":"History Planning_Medium_category Daily Imported",
-            "export_asset_work_small_category_xlsx":"History Planning_Small_category Daily Exported","import_asset_work_small_category_xlsx":"History Planning_Small_category Daily Imported"
+    columns={"export_marker": "Marker Daily Exported", "import_marker": "Marker Daily Imported",
+             "export_measure_length": "Measurement Daily Exported",
+             "import_measure_length": "Measurement Daily Imported", "export_object": "Simulation Daily Exported",
+             "import_object": "Simulation Daily Imported",
+             "export_asset_data": "Machine Daily Exported", "import_asset_data": "Machine Daily Imported",
+             "export_pipe_group_xlsx": "Pipe Daily Exported", "import_pipe_group_xlsx": "Pipe Daily Imported",
+             "export_asset_regulation": "Regulations Daily Exported",
+             "import_asset_regulation": "Regulations Daily Imported",
+             "export_asset_category": "Machine Category Daily Exported",
+             "import_asset_category": "Machine Category Daily Imported",
+             "export_asset_document_xlsx": "Books Daily Exported", "import_asset_document_xlsx": "Books Daily Imported",
+             "export_pipe_group_document_xlsx": "Books_pipe Daily Exported",
+             "import_pipe_group_document_xlsx": "Books_pipe Daily Imported",
+             "export_asset_document_main_category_xlsx": "Books_main_category Daily Exported",
+             "import_asset_document_main_category_xlsx": "Books_main_category Daily Imported",
+             "export_asset_document_sub_category_xlsx": "Books_sub_category Daily Exported",
+             "import_asset_document_sub_category_xlsx": "Books_sub_category Daily Imported",
+             "export_tag": "Tag Daily Exported", "import_tag": "Tag Dialy Imported",
+             "export_asset_work_xlsx": "History Planning Daily Exported",
+             "import_asset_work_xlsx": "History Planning Daily Imported",
+             "export_pipe_group_work_xlsx": "History Planning_pipe Daily Exported",
+             "import_pipe_group_work_xlsx": "History Planning_pipe Daily Imported",
+             "export_asset_work_large_category_xlsx": "History Planning_large_category Daily Exported",
+             "import_asset_work_large_category_xlsx": "History Planning_large_category Daily Imported",
+             "export_asset_work_middle_category_xlsx": "History Planning_Medium_category Daily Exported",
+             "import_asset_work_middle_category_xlsx": "History Planning_Medium_category Daily Imported",
+             "export_asset_work_small_category_xlsx": "History Planning_Small_category Daily Exported",
+             "import_asset_work_small_category_xlsx": "History Planning_Small_category Daily Imported"
              },
     inplace=True
 )
