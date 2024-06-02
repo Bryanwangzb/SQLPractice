@@ -13,14 +13,15 @@ select
     , count(*) as user_amount 
 from
     company_users 
-where date(created_at) between '2024/04/01' - INTERVAL 1 MONTH AND '2024/04/01'
+AND DATE (created_at) >=('2024/04/01' - INTERVAL 1 MONTH) AND DATE (created_at)<'2024/04/01' 
 group by
     company_id
 
---日間平均ログイン数
--- 確認：ログイン回数を切り上げてよいか？
-  SELECT
-        cu.company_id,CEILING(count(*)/30)
+--日間平均ログイン人数
+WITH daiy_login_temp AS ( 
+    SELECT
+        cu.company_id AS company_id
+        , count(DISTINCT DATE (cl.created_at)) AS login_count 
     FROM
         company_logs AS cl 
         LEFT OUTER JOIN company_users AS cu 
@@ -28,50 +29,72 @@ group by
     WHERE
         cl.url = 'api/company/auth/login' 
         AND cu.email NOT LIKE '%@brownreverse%' 
-        AND date(cl.created_at) between '2024/04/01' - INTERVAL 1 MONTH AND '2024/04/01'
-        AND cu.company_id=100
-    group by cu.company_id
+          AND DATE (cl.created_at) >=('2024/04/01' - INTERVAL 1 MONTH) AND DATE (cl.created_at)<'2024/04/01' 
+        AND cu.company_id = 100 
+    GROUP BY
+        cu.id
+        , DATE (cl.created_at)
+) 
+SELECT
+    company_id
+    , ceiling(sum(login_count) /31)
+FROM
+    daiy_login_temp
 
 
 --日間平均ログイン数（前月比) 
-WITH PRE_MONTH_LOGIN AS (
+WITH daily_login_temp AS (
     SELECT
-        cu.company_id,
-        CEILING(COUNT(*) / 30.0) AS amount
+        cu.company_id AS company_id,
+        DATE(cl.created_at) AS login_date,
+        COUNT(DISTINCT DATE(cl.created_at)) AS login_count 
     FROM
-        company_logs AS cl
-        LEFT JOIN company_users AS cu
-            ON JSON_UNQUOTE(JSON_EXTRACT(cl.request_parameters, '$.email')) = cu.email
+        company_logs AS cl 
+        LEFT OUTER JOIN company_users AS cu 
+            ON JSON_UNQUOTE(JSON_EXTRACT(cl.request_parameters, '$.email')) = cu.email 
     WHERE
-        cl.url = 'api/company/auth/login'
-        AND cu.email NOT LIKE '%@brownreverse%'
-        AND cl.created_at >= DATE_SUB('2024-03-01', INTERVAL 1 MONTH)
-        AND cl.created_at < '2024-03-01'
-        AND cu.company_id = 100
+        cl.url = 'api/company/auth/login' 
+        AND cu.email NOT LIKE '%@brownreverse%' 
+        AND cu.company_id = 100 
     GROUP BY
-        cu.company_id
+        cu.company_id,
+        cu.id,
+        DATE(cl.created_at)
+),
+login_counts as (
+    SELECT
+        company_id,
+        SUM(CASE 
+            WHEN login_date >=('2024/03/01' - INTERVAL 1 MONTH) AND login_date < '2024/03/01' THEN login_count
+            ELSE 0 
+        END) AS previous_month_login_count,
+        SUM(CASE 
+            WHEN login_date >= ( '2024/04/01' - INTERVAL 1 MONTH) AND login_date < '2024/04/01' THEN login_count
+            ELSE 0 
+        END) AS current_month_login_count
+    FROM
+        daily_login_temp
+    GROUP BY
+        company_id
 )
 SELECT
-    cu.company_id,
-    CEILING(COUNT(*) / 30.0) / pml.amount AS login_ratio
+    company_id,
+    ceiling(previous_month_login_count/29) as previous_avg,
+    ceiling(current_month_login_count/31) as current_avg,
+    CASE 
+        WHEN current_month_login_count = 0 THEN NULL 
+        ELSE  ceiling(current_month_login_count/31)/ceiling(previous_month_login_count/29) 
+    END AS login_count_ratio
 FROM
-    company_logs AS cl
-    LEFT JOIN company_users AS cu
-        ON JSON_UNQUOTE(JSON_EXTRACT(cl.request_parameters, '$.email')) = cu.email
-    LEFT JOIN PRE_MONTH_LOGIN AS pml
-        ON cu.company_id = pml.company_id
-WHERE
-    cl.url = 'api/company/auth/login'
-    AND cu.email NOT LIKE '%@brownreverse%'
-    AND cl.created_at >= DATE_SUB('2024-04-01', INTERVAL 1 MONTH)
-    AND cl.created_at < '2024-04-01'
-    AND cu.company_id = 100
-GROUP BY
-    cu.company_id, pml.amount;
+    login_counts;
+
 
 --週間平均ログイン数
- SELECT
-        cu.company_id,CEILING(count(*)/4)
+WITH week_login_temp AS ( 
+    SELECT
+        cu.company_id AS company_id
+        ,  yearweek (cl.created_at) as created_yearweek
+        , count(DISTINCT yearweek (cl.created_at)) AS login_count 
     FROM
         company_logs AS cl 
         LEFT OUTER JOIN company_users AS cu 
@@ -79,50 +102,92 @@ GROUP BY
     WHERE
         cl.url = 'api/company/auth/login' 
         AND cu.email NOT LIKE '%@brownreverse%' 
-        AND date(cl.created_at) between '2024/04/01' - INTERVAL 1 MONTH AND '2024/04/01'
-        AND cu.company_id=100
-    group by cu.company_id
-
+        AND DATE (cl.created_at) >= ( '2024/04/01' - INTERVAL 1 MONTH) AND DATE (cl.created_at) < '2024/04/01' 
+        AND cu.company_id = 100 
+    GROUP BY
+        cu.id
+        , yearweek (cl.created_at)
+) 
+SELECT
+    company_id
+    , ceiling(sum(login_count)/4)
+FROM
+    week_login_temp
+    
 
 --週間平均ログイン数（前月比）
-WITH PRE_MONTH_LOGIN AS (
+WITH year_week_current_login AS ( 
+    WITH week_login_temp AS ( 
+        SELECT
+            cu.company_id AS company_id
+            , cu.id
+            , yearweek(cl.created_at) AS created_yearweek
+            , count(DISTINCT yearweek(cl.created_at)) AS login_count 
+        FROM
+            company_logs AS cl 
+            LEFT OUTER JOIN company_users AS cu 
+                ON JSON_UNQUOTE(json_extract(cl.request_parameters, '$.email')) = cu.email 
+        WHERE
+            cl.url = 'api/company/auth/login' 
+            AND cu.email NOT LIKE '%@brownreverse%' 
+            AND DATE (cl.created_at) >= '2024/04/01' - INTERVAL 1 MONTH AND DATE (cl.created_at) <'2024/04/01' 
+            AND cu.company_id = 100 
+        GROUP BY
+            cu.company_id
+            , cu.id
+            , yearweek(cl.created_at)
+    ) 
     SELECT
-        cu.company_id,
-        CEILING(COUNT(*) / 4) AS amount
+        company_id
+        , sum(login_count) AS temp_result
+        , ceiling(sum(login_count) / 4) AS RESULT 
     FROM
-        company_logs AS cl
-        LEFT JOIN company_users AS cu
-            ON JSON_UNQUOTE(JSON_EXTRACT(cl.request_parameters, '$.email')) = cu.email
-    WHERE
-        cl.url = 'api/company/auth/login'
-        AND cu.email NOT LIKE '%@brownreverse%'
-        AND cl.created_at >= DATE_SUB('2024-03-01', INTERVAL 1 MONTH)
-        AND cl.created_at < '2024-03-01'
-        AND cu.company_id = 100
-    GROUP BY
-        cu.company_id
-)
+        week_login_temp
+) 
+, year_week_previous_login AS ( 
+    WITH week_login_temp AS ( 
+        SELECT
+            cu.company_id AS company_id
+            , cu.id
+            , yearweek(cl.created_at) AS created_yearweek
+            , count(DISTINCT yearweek(cl.created_at)) AS login_count 
+        FROM
+            company_logs AS cl 
+            LEFT OUTER JOIN company_users AS cu 
+                ON JSON_UNQUOTE(json_extract(cl.request_parameters, '$.email')) = cu.email 
+        WHERE
+            cl.url = 'api/company/auth/login' 
+            AND cu.email NOT LIKE '%@brownreverse%' 
+            AND DATE (cl.created_at) >= ('2024/03/01' - INTERVAL 1 MONTH) AND date(cl.created_at)<'2024/03/01' 
+            AND cu.company_id = 100 
+        GROUP BY
+            cu.company_id
+            , cu.id
+            , yearweek(cl.created_at)
+    ) 
+    SELECT
+        company_id
+        , sum(login_count) AS temp_result
+        , ceiling(sum(login_count) / 4) AS RESULT 
+    FROM
+        week_login_temp
+) 
 SELECT
-    cu.company_id,
-    CEILING(COUNT(*) / 4) / pml.amount AS login_ratio
+    ywc.temp_result
+    , ywp.temp_result
+    , ywc.temp_result / ywp.temp_result 
 FROM
-    company_logs AS cl
-    LEFT JOIN company_users AS cu
-        ON JSON_UNQUOTE(JSON_EXTRACT(cl.request_parameters, '$.email')) = cu.email
-    LEFT JOIN PRE_MONTH_LOGIN AS pml
-        ON cu.company_id = pml.company_id
-WHERE
-    cl.url = 'api/company/auth/login'
-    AND cu.email NOT LIKE '%@brownreverse%'
-    AND cl.created_at >= DATE_SUB('2024-04-01', INTERVAL 1 MONTH)
-    AND cl.created_at < '2024-04-01'
-    AND cu.company_id = 100
-GROUP BY
-    cu.company_id, pml.amount;
+    year_week_current_login AS ywc 
+    LEFT OUTER JOIN year_week_previous_login AS ywp 
+        ON ywc.company_id = ywp.company_id
+
 
 --月間ログイン人数
-SELECT
-        cu.company_id,count(*)
+WITH month_login_temp AS ( 
+    SELECT
+        cu.company_id AS company_id
+        , yearweek(cl.created_at) AS created_yearweek
+        , count(DISTINCT MONTH (cl.created_at)) AS login_count 
     FROM
         company_logs AS cl 
         LEFT OUTER JOIN company_users AS cu 
@@ -130,45 +195,81 @@ SELECT
     WHERE
         cl.url = 'api/company/auth/login' 
         AND cu.email NOT LIKE '%@brownreverse%' 
-        AND date(cl.created_at) between '2024/04/01' - INTERVAL 1 MONTH AND '2024/04/01'
-        AND cu.company_id=100
-    group by cu.company_id
+        AND DATE (cl.created_at) >= ('2024/04/01' - INTERVAL 1 MONTH) 
+        AND DATE (cl.created_at) < '2024/04/01' 
+        AND cu.company_id = 100 
+    GROUP BY
+        cu.id
+        , MONTH (cl.created_at)
+) 
+SELECT
+    company_id
+    , sum(login_count)
+FROM
+    month_login_temp
+
 
 --月間平均ログイン数（前月比）
-WITH PRE_MONTH_LOGIN AS (
+WITH year_month_current_login AS ( 
+ with month_login_temp as(
     SELECT
-        cu.company_id,
-        COUNT(*)
+        cu.company_id AS company_id
+        , yearweek(cl.created_at) AS created_yearweek
+        , count(DISTINCT MONTH (cl.created_at)) AS login_count 
     FROM
-        company_logs AS cl
-        LEFT JOIN company_users AS cu
-            ON JSON_UNQUOTE(JSON_EXTRACT(cl.request_parameters, '$.email')) = cu.email
+        company_logs AS cl 
+        LEFT OUTER JOIN company_users AS cu 
+            ON JSON_UNQUOTE(json_extract(cl.request_parameters, '$.email')) = cu.email 
     WHERE
-        cl.url = 'api/company/auth/login'
-        AND cu.email NOT LIKE '%@brownreverse%'
-        AND cl.created_at >= DATE_SUB('2024-03-01', INTERVAL 1 MONTH)
-        AND cl.created_at < '2024-03-01'
-        AND cu.company_id = 100
+        cl.url = 'api/company/auth/login' 
+        AND cu.email NOT LIKE '%@brownreverse%' 
+        AND DATE (cl.created_at) >= ('2024/04/01' - INTERVAL 1 MONTH) 
+        AND DATE (cl.created_at) < '2024/04/01' 
+        AND cu.company_id = 100 
     GROUP BY
-        cu.company_id
-)
+        cu.id
+        , MONTH (cl.created_at)
+) 
 SELECT
-    cu.company_id,
-    CEILING(COUNT(*) / 4) / pml.amount AS login_ratio
+    company_id
+    , sum(login_count) as login_count
 FROM
-    company_logs AS cl
-    LEFT JOIN company_users AS cu
-        ON JSON_UNQUOTE(JSON_EXTRACT(cl.request_parameters, '$.email')) = cu.email
-    LEFT JOIN PRE_MONTH_LOGIN AS pml
-        ON cu.company_id = pml.company_id
-WHERE
-    cl.url = 'api/company/auth/login'
-    AND cu.email NOT LIKE '%@brownreverse%'
-    AND cl.created_at >= DATE_SUB('2024-04-01', INTERVAL 1 MONTH)
-    AND cl.created_at < '2024-04-01'
-    AND cu.company_id = 100
-GROUP BY
-    cu.company_id, pml.amount;
+    month_login_temp
+),   
+year_month_previous_login AS ( 
+    with month_login_temp as(
+    SELECT
+        cu.company_id AS company_id
+        , yearweek(cl.created_at) AS created_yearweek
+        , count(DISTINCT MONTH (cl.created_at)) AS login_count 
+    FROM
+        company_logs AS cl 
+        LEFT OUTER JOIN company_users AS cu 
+            ON JSON_UNQUOTE(json_extract(cl.request_parameters, '$.email')) = cu.email 
+    WHERE
+        cl.url = 'api/company/auth/login' 
+        AND cu.email NOT LIKE '%@brownreverse%' 
+        AND DATE (cl.created_at) >= ('2024/03/01' - INTERVAL 1 MONTH) 
+        AND DATE (cl.created_at) < '2024/03/01' 
+        AND cu.company_id = 100 
+    GROUP BY
+        cu.id
+        , MONTH (cl.created_at)
+) 
+SELECT
+    company_id
+    , sum(login_count) as login_count
+FROM
+    month_login_temp)
+select
+     ymc.company_id,
+     ymc.login_count/ymp.login_count
+from
+    year_month_current_login as ymc
+left outer join
+    year_month_previous_login as ymp
+on
+    ymc.company_id = ymp.company_id
 
 --マーカー数（合計）
 with company_area_info as (
@@ -423,5 +524,4 @@ WHERE
     cai.company_id = 100 
     AND pg.created_at < '2024-04-01' 
     AND pg.created_at >= DATE_SUB('2024-04-01', INTERVAL 1 MONTH) 
-    AND pg.created_at < '2024-04-01'
 
