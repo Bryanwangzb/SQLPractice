@@ -84,10 +84,11 @@ conn = create_db_connection(db_host_name, db_user_name, pwd, db)
 ################
 # Query
 ################
-q_asset_color_code = f'''
+q_color_code = f'''
 SELECT
     com.id AS company_id
     , com.name AS company_name
+    , 'asset' as Category
     , acl.id as color_id
     , acl.color as color_code
     , acj.name as name_ja
@@ -102,16 +103,17 @@ FROM
         ON acl.id = ace.asset_color_label_id and ace.language='en'
 WHERE
     acl.id IS NOT NULL
-'''
 
-q_object_color_code=f'''
+UNION ALL
+
 SELECT 
     com.id AS company_id
     , com.name AS company_name
-    , mil.id as color_id
-    , mil.color as color_code
-    , mij.name as name_ja
-    , mie.name as name_en
+    , 'object' AS Category
+    , mil.id AS color_id
+    , mil.color AS color_code
+    , mij.name AS name_ja
+    , mie.name AS name_en
 FROM
     {db}.companies AS com 
     LEFT OUTER JOIN {db}.marker_importance_labels as mil
@@ -124,6 +126,10 @@ WHERE
     mil.id IS NOT NULL
 '''
 
+q_object_color_code=f'''
+
+'''
+
 ################
 # output query result
 ################
@@ -132,32 +138,19 @@ WHERE
 logger.info("Load query contents...")
 
 # get asset color info
-asset_color_code_info = read_query(conn,q_asset_color_code)
-# get object color info
-object_color_code_info = read_query(conn,q_object_color_code)
+color_code_info = read_query(conn,q_color_code)
 
 logger.info("Query contents are loaded.")
 
 # Output asset color info
-with open(color_work_files + '\\asset_color_code_master' + '.csv', 'w', newline='', encoding='utf-8') as file:
+with open(color_work_files + '\color_code_master' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow(['Company ID', 'Company Name', 'Color ID','Color Code', 'Name Ja','Name En'])
-    for _asset_color_code_info in asset_color_code_info:
+    writer.writerow(['Company ID', 'Company Name', 'Category','Color ID','Color Code', 'Name Ja','Name En'])
+    for _color_code_info in color_code_info:
         writer.writerow(
-            [_asset_color_code_info[0], _asset_color_code_info[1], _asset_color_code_info[2], _asset_color_code_info[3],
-             _asset_color_code_info[4], _asset_color_code_info[5]]
+            [_color_code_info[0], _color_code_info[1], _color_code_info[2], _color_code_info[3],
+             _color_code_info[4], _color_code_info[5],_color_code_info[6]]
         )
 logger.info("asset_color_code_master csv file was created.")
 
 
-
-# Output asset color info
-with open(color_work_files + '\object_color_code_master' + '.csv', 'w', newline='', encoding='utf-8') as file:
-    writer = csv.writer(file)
-    writer.writerow(['Company ID', 'Company Name', 'Color ID','Color Code', 'Name Ja','Name En'])
-    for _object_color_code_info in object_color_code_info:
-        writer.writerow(
-            [_object_color_code_info[0], _object_color_code_info[1], _object_color_code_info[2], _object_color_code_info[3],
-             _object_color_code_info[4], _object_color_code_info[5]]
-        )
-logger.info("object_color_code_master csv file was created.")

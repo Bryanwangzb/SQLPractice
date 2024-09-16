@@ -3,7 +3,7 @@ Title: Data Process Script
 Description: This script processes raw data and creates csv files.
 Author: WangZhibin
 Date Created: 2024-05-30
-Last Modified: 2024-04-30
+Last Modified: 2024-06-14
 Version: 1.0
 """
 
@@ -132,7 +132,7 @@ SELECT
         WHEN cl.platform = '1' 
             THEN 'web' 
         WHEN cl.platform = '2' 
-            THEN 'ios' 
+            THEN 'app' 
         ELSE cl.platform 
         END AS access_from
     , gi.get_info_count 
@@ -268,24 +268,53 @@ WITH COMPANY_ONE_YEAR AS (
         , cu.name AS company_name
         , dr.DATE AS DATE 
     FROM
-        {db}.companies cu 
+        companies cu 
         CROSS JOIN DateRange dr 
     ORDER BY
         cu.id
         , dr.DATE ASC
 ) 
+, APP_DL AS ( 
+    SELECT
+        t.company_id
+        , t.company_name
+        , t.DATE
+        , count(cl.id) AS app_dl_count 
+    FROM
+        COMPANY_ONE_YEAR AS t 
+        LEFT OUTER JOIN company_logs AS cl 
+            ON t.company_id = cl.company_id 
+    WHERE
+        DATE (cl.created_at) <= t.DATE 
+        AND cl.url = 'api/company/record_download_native_app' 
+    GROUP BY
+        t.company_id
+        , t.company_name
+        , DATE 
+    ORDER BY
+        t.company_id
+) 
 SELECT
     t.company_id
     , t.company_name
     , t.DATE
-    , count(cu.id) as account_sum
+    , count(cu.id) AS account_sum
+    , CASE 
+        WHEN ad.app_dl_count IS NULL 
+            THEN 0 
+        WHEN ad.app_dl_count IS NOT NULL 
+            THEN ad.app_dl_count 
+        END AS app_dl_count 
 FROM
     COMPANY_ONE_YEAR AS t 
     LEFT OUTER JOIN company_users AS cu 
         ON t.company_id = cu.company_id 
+    LEFT OUTER JOIN APP_DL AS ad 
+        ON t.company_id = ad.company_id 
+        AND t.DATE = ad.DATE 
 WHERE
-    DATE (created_at) < t.DATE 
-    AND cu.email NOT LIKE '%@brownreverse%'
+    DATE (cu.created_at) < t.DATE 
+    AND cu.email NOT LIKE '%@brownreverse%' 
 GROUP BY
     t.company_id
     , t.company_name
@@ -302,10 +331,10 @@ SELECT
     , pa.id AS plant_area_id
     , pa.name AS plant_area_name
 FROM
-    {db}.companies AS com 
-    LEFT OUTER JOIN {db}.plants AS pla 
+    companies AS com 
+    LEFT OUTER JOIN plants AS pla 
         ON com.id = pla.company_id 
-    LEFT OUTER JOIN {db}.plant_areas AS pa 
+    LEFT OUTER JOIN plant_areas AS pa 
         ON pla.id = pa.plant_id 
 WHERE
     pa.id IS NOT NULL 
@@ -316,18 +345,18 @@ SELECT DISTINCT
     , m.plant_area_id AS plant_area_id
     ,'' AS plant_area_name
 FROM
-    {db}.companies AS com 
-    LEFT OUTER JOIN {db}.plants AS pla 
+    companies AS com 
+    LEFT OUTER JOIN plants AS pla 
         ON com.id = pla.company_id 
-    LEFT OUTER JOIN {db}.plant_areas AS pa 
+    LEFT OUTER JOIN plant_areas AS pa 
         ON pla.id = pa.plant_id 
-    LEFT OUTER JOIN {db}.company_users AS cu 
+    LEFT OUTER JOIN company_users AS cu 
         ON com.id = cu.company_id 
-    LEFT OUTER JOIN {db}.markers AS m
+    LEFT OUTER JOIN markers AS m
         ON cu.id=m.company_user_id
-    LEFT OUTER JOIN {db}.measure_lengths as ml
+    LEFT OUTER JOIN measure_lengths AS ml
         ON cu.id=ml.company_user_id
-    LEFT OUTER JOIN {db}.plant_area_objects as pao
+    LEFT OUTER JOIN plant_area_objects AS pao
         ON cu.id=pao.company_user_id
     WHERE pa.id IS NULL AND m.plant_area_id IS NOT NULL
 )
@@ -341,18 +370,31 @@ SELECT
     ast.name AS object_name,
     DATE(ast.created_at) AS object_registered_date,
     CASE
+        WHEN ast.platform IS NULL THEN 'unknown'
+        WHEN ast.platform = '1' THEN 'web'
+        WHEN ast.platform = '2' THEN 'app'
+    END AS registered_from,
+    CASE
         WHEN ast.created_at <> ast.updated_at THEN DATE(ast.updated_at)
         ELSE ''
     END AS updated_date,
+    CASE
+        WHEN ast.platform IS NULL THEN 'unknown'
+        WHEN ast.platform = '1' THEN 'web'
+        WHEN ast.platform = '2' THEN 'app'
+    END AS updated_from,
     '' AS deleted_date,
-    '' AS user_id,
-    '' AS user_name
+    '' AS deleted_from,
+    ast.company_user_id AS user_id,
+    cu.name AS user_name
 FROM
     plant_master AS pm
-    LEFT OUTER JOIN {db}.assets AS ast
+    LEFT OUTER JOIN assets AS ast
         ON pm.plant_area_id = ast.plant_area_id
+    LEFT OUTER JOIN company_users AS cu
+        ON ast.company_user_id = cu.id
 WHERE
-    ast.id IS NOT NULL
+    ast.id IS NOT NULL 
 UNION ALL
 SELECT
     pm.company_id,
@@ -364,21 +406,36 @@ SELECT
     mk.name AS object_name,
     DATE(mk.created_at) AS object_registered_date,
     CASE
+        WHEN mk.platform IS NULL THEN 'unknown'
+        WHEN mk.platform = '1' THEN 'web'
+        WHEN mk.platform = '2' THEN 'app'
+    END AS registered_from,
+    CASE
         WHEN mk.created_at <> mk.updated_at AND mk.deleted_at IS NULL THEN DATE(mk.updated_at)
         WHEN mk.created_at <> mk.updated_at AND mk.deleted_at IS NOT NULL THEN ''
         ELSE ''
     END AS updated_date,
+        CASE
+        WHEN mk.platform IS NULL THEN 'unknown'
+        WHEN mk.platform = '1' THEN 'web'
+        WHEN mk.platform = '2' THEN 'app'
+    END AS updated_from,
     CASE
         WHEN mk.deleted_at IS NOT NULL THEN DATE(mk.deleted_at)
         ELSE ''
     END AS deleted_date,
-    mk.company_user_id as user_id,
-    cu.name as user_name
+    CASE
+        WHEN mk.platform IS NULL THEN 'unknown'
+        WHEN mk.platform = '1' THEN 'web'
+        WHEN mk.platform = '2' THEN 'app'
+    END AS deleted_from,
+    mk.company_user_id AS user_id,
+    cu.name AS user_name
 FROM
     plant_master AS pm
-    LEFT OUTER JOIN {db}.markers AS mk
+    LEFT OUTER JOIN markers AS mk
         ON pm.plant_area_id = mk.plant_area_id
-    LEFT OUTER JOIN {db}.company_users as cu
+    LEFT OUTER JOIN company_users AS cu
         ON mk.company_user_id = cu.id
 WHERE
     mk.id IS NOT NULL
@@ -393,20 +450,37 @@ SELECT
     '' AS object_name,
     DATE(ps.created_at) AS object_registered_date,
     CASE
+        WHEN ps.platform IS NULL THEN 'unknown'
+        WHEN ps.platform = '1' THEN 'web'
+        WHEN ps.platform = '2' THEN 'app'
+    END AS rigistered_from,
+    CASE
         WHEN ps.created_at <> ps.updated_at AND ps.deleted_at IS NULL THEN DATE(ps.updated_at)
         WHEN ps.created_at <> ps.updated_at AND ps.deleted_at IS NOT NULL THEN ''
         ELSE ''
     END AS updated_date,
     CASE
+        WHEN ps.platform IS NULL THEN 'unknown'
+        WHEN ps.platform = '1' THEN 'web'
+        WHEN ps.platform = '2' THEN 'app'
+    END AS updated_from,
+    CASE
         WHEN ps.deleted_at IS NOT NULL THEN DATE(ps.deleted_at)
         ELSE ''
     END AS deleted_date,
-    '' AS user_id,
-    '' AS user_name
+     CASE
+        WHEN ps.platform IS NULL THEN 'unknown'
+        WHEN ps.platform = '1' THEN 'web'
+        WHEN ps.platform = '2' THEN 'app'
+    END AS deleted_from,
+    ps.company_user_id AS user_id,
+    cu.name AS user_name
 FROM
     plant_master AS pm
-    LEFT OUTER JOIN {db}.pipe_groups AS ps
+    LEFT OUTER JOIN pipe_groups AS ps
         ON pm.plant_area_id = ps.plant_area_id
+    LEFT OUTER JOIN company_users AS cu
+        ON ps.company_user_id = cu.id
 WHERE
     ps.id IS NOT NULL
 UNION ALL
@@ -420,21 +494,36 @@ SELECT
     ml.name AS object_name,
     DATE(ml.created_at) AS object_registered_date,
     CASE
+        WHEN ml.platform IS NULL THEN 'unknown'
+        WHEN ml.platform = '1' THEN 'web'
+        WHEN ml.platform = '2' THEN 'app'
+    END AS registered_from,
+    CASE
         WHEN ml.created_at <> ml.updated_at AND ml.deleted_at IS NULL THEN DATE(ml.updated_at)
         WHEN ml.created_at <> ml.updated_at AND ml.deleted_at IS NOT NULL THEN ''
         ELSE ''
     END AS updated_date,
     CASE
+        WHEN ml.platform IS NULL THEN 'unknown'
+        WHEN ml.platform = '1' THEN 'web'
+        WHEN ml.platform = '2' THEN 'app'
+    END AS updated_from,
+    CASE
         WHEN ml.deleted_at IS NOT NULL THEN DATE(ml.deleted_at)
         ELSE ''
     END AS deleted_date,
+    CASE
+        WHEN ml.platform IS NULL THEN 'unknown'
+        WHEN ml.platform = '1' THEN 'web'
+        WHEN ml.platform = '2' THEN 'app'
+    END AS deleted_from,
     ml.company_user_id AS user_id,
     cu.name AS user_name
 FROM
     plant_master AS pm
-    LEFT OUTER JOIN {db}.measure_lengths AS ml
+    LEFT OUTER JOIN measure_lengths AS ml
         ON pm.plant_area_id = ml.plant_area_id
-    LEFT OUTER JOIN company_users as cu
+    LEFT OUTER JOIN company_users AS cu
         ON ml.company_user_id = cu.id      
 WHERE
     ml.id IS NOT NULL
@@ -449,21 +538,36 @@ SELECT
     pao.name AS object_name,
     DATE(pao.created_at) AS object_registered_date,
     CASE
+        WHEN pao.platform IS NULL THEN 'unknown'
+        WHEN pao.platform = '1' THEN 'web'
+        WHEN pao.platform = '2' THEN 'app'
+    END AS registered_from,
+    CASE
         WHEN pao.created_at <> pao.updated_at AND pao.deleted_at IS NULL THEN DATE(pao.updated_at)
         WHEN pao.created_at <> pao.updated_at AND pao.deleted_at IS NOT NULL THEN ''
         ELSE ''
     END AS updated_date,
     CASE
+        WHEN pao.platform IS NULL THEN 'unknown'
+        WHEN pao.platform = '1' THEN 'web'
+        WHEN pao.platform = '2' THEN 'app'
+    END AS updated_from,
+    CASE
         WHEN pao.deleted_at IS NOT NULL THEN DATE(pao.deleted_at)
         ELSE ''
     END AS deleted_date,
-    pao.company_user_id as user_id,
-    cu.name as user_name
+    CASE
+        WHEN pao.platform IS NULL THEN 'unknown'
+        WHEN pao.platform = '1' THEN 'web'
+        WHEN pao.platform = '2' THEN 'app'
+    END AS deleted_from,
+    pao.company_user_id AS user_id,
+    cu.name AS user_name
 FROM
     plant_master AS pm
-    LEFT OUTER JOIN {db}.plant_area_objects AS pao
+    LEFT OUTER JOIN plant_area_objects AS pao
         ON pm.plant_area_id = pao.plant_area_id
-    LEFT OUTER JOIN company_users as cu
+    LEFT OUTER JOIN company_users AS cu
         ON pao.company_user_id = cu.id 
 WHERE
     pao.id IS NOT NULL;
@@ -513,13 +617,13 @@ SELECT
     DATE(m.created_at) AS created_date,
     COUNT(CASE WHEN m.platform IS NULL THEN 1 END) AS marker_daily_amount_unknown,
     COUNT(CASE WHEN m.platform = '1' THEN 1 END) AS marker_daily_amount_web,
-    COUNT(CASE WHEN m.platform = '2' THEN 1 END) AS marker_daily_amount_ios,
+    COUNT(CASE WHEN m.platform = '2' THEN 1 END) AS marker_daily_amount_app,
     COUNT(CASE WHEN m.created_at <> m.updated_at AND m.platform IS NULL AND m.deleted_at IS NULL THEN 1 END) AS marker_daily_updated_amount_unknown,
     COUNT(CASE WHEN m.created_at <> m.updated_at AND m.platform = '1' AND m.deleted_at IS NULL THEN 1 END) AS marker_daily_updated_amount_web,
-    COUNT(CASE WHEN m.created_at <> m.updated_at AND m.platform = '2' AND m.deleted_at IS NULL THEN 1 END) AS marker_daily_updated_amount_ios,
+    COUNT(CASE WHEN m.created_at <> m.updated_at AND m.platform = '2' AND m.deleted_at IS NULL THEN 1 END) AS marker_daily_updated_amount_app,
     COUNT(CASE WHEN m.deleted_at IS NOT NULL AND m.platform IS NULL THEN 1 END) AS marker_daily_deleted_amount_unknown,
     COUNT(CASE WHEN m.deleted_at IS NOT NULL AND m.platform = '1' THEN 1 END) AS marker_daily_deleted_amount_web,
-    COUNT(CASE WHEN m.deleted_at IS NOT NULL AND m.platform = '2' THEN 1 END) AS marker_daily_deleted_amount_ios
+    COUNT(CASE WHEN m.deleted_at IS NOT NULL AND m.platform = '2' THEN 1 END) AS marker_daily_deleted_amount_app
 FROM
     markers AS m
     LEFT OUTER JOIN company_users AS cu 
@@ -543,16 +647,16 @@ SELECT
     DATE(a.created_at) AS created_date,
     COUNT(CASE WHEN a.platform IS NULL THEN 1 END) AS machine_daily_amount_unknown,
     COUNT(CASE WHEN a.platform = '1' THEN 1 END) AS machine_daily_amount_web,
-    COUNT(CASE WHEN a.platform = '2' THEN 1 END) AS machine_daily_amount_ios,
+    COUNT(CASE WHEN a.platform = '2' THEN 1 END) AS machine_daily_amount_app,
     COUNT(CASE WHEN a.created_at <> a.updated_at AND a.platform IS NULL THEN 1 END) AS  machine_daily_updated_amount_unknown,
     COUNT(CASE WHEN a.created_at <> a.updated_at AND a.platform='1' THEN 1 END) AS  machine_daily_updated_amount_web,
-    COUNT(CASE WHEN a.created_at <> a.updated_at AND a.platform='2' THEN 1 END) AS  machine_daily_updated_amount_ios,
+    COUNT(CASE WHEN a.created_at <> a.updated_at AND a.platform='2' THEN 1 END) AS  machine_daily_updated_amount_app,
     COUNT(CASE WHEN position_x IS NOT NULL AND a.platform IS NULL THEN 1 END) AS machine_location_daily_amount_unknown,
     COUNT(CASE WHEN position_x IS NOT NULL AND a.platform='1' THEN 1 END) AS machine_location_daily_amount_web,
-    COUNT(CASE WHEN position_x IS NOT NULL AND a.platform='2' THEN 1 END) AS machine_location_daily_amount_ios,
+    COUNT(CASE WHEN position_x IS NOT NULL AND a.platform='2' THEN 1 END) AS machine_location_daily_amount_app,
     '' AS machine_daily_deleted_amount_unknown,
     '' AS machine_daily_deleted_amount_web,
-    '' AS machine_daily_deleted_amount_ios
+    '' AS machine_daily_deleted_amount_app
 FROM
     assets AS a
   LEFT OUTER JOIN company_users AS cu 
@@ -576,13 +680,13 @@ SELECT
     DATE (ml.created_at),
     COUNT(CASE WHEN ml.platform IS NULL THEN 1 END) AS measurement_lengths_daily_amount_unknown,
     COUNT(CASE WHEN ml.platform =  '1' THEN 1 END) AS measurement_lengths_daily_amount_web,
-    COUNT(CASE WHEN ml.platform =  '2' THEN 1 END) AS measurement_lengths_daily_amount_ios,
+    COUNT(CASE WHEN ml.platform =  '2' THEN 1 END) AS measurement_lengths_daily_amount_app,
     COUNT(CASE WHEN ml.created_at <> ml.updated_at AND ml.deleted_at IS NULL AND ml.platform IS NULL THEN 1 END) AS measurement_lengths_daily_updated_amount_unknown,
     COUNT(CASE WHEN ml.created_at <> ml.updated_at AND ml.deleted_at IS NULL AND ml.platform = '1' THEN 1 END) AS measurement_lengths_daily_updated_amount_web,
-    COUNT(CASE WHEN ml.created_at <> ml.updated_at AND ml.deleted_at IS NULL AND ml.platform = '2' THEN 1 END) AS measurement_lengths_daily_updated_amount_ios,
+    COUNT(CASE WHEN ml.created_at <> ml.updated_at AND ml.deleted_at IS NULL AND ml.platform = '2' THEN 1 END) AS measurement_lengths_daily_updated_amount_app,
     COUNT(CASE WHEN ml.deleted_at IS NOT NULL AND ml.platform IS NULL THEN 1 END) AS measure_lengths_daily_deleted_amount_unknown,
     COUNT(CASE WHEN ml.deleted_at IS NOT NULL AND ml.platform = '1' THEN 1 END) AS measure_lengths_daily_deleted_amount_web,
-    COUNT(CASE WHEN ml.deleted_at IS NOT NULL AND ml.platform = '2' THEN 1 END) AS measure_lengths_daily_deleted_amount_ios
+    COUNT(CASE WHEN ml.deleted_at IS NOT NULL AND ml.platform = '2' THEN 1 END) AS measure_lengths_daily_deleted_amount_app
 FROM
     measure_lengths AS ml
 LEFT OUTER JOIN
@@ -606,13 +710,13 @@ SELECT
     DATE (pao.created_at),
     COUNT(CASE WHEN pao.platform IS NULL THEN 1 END) AS simulation_daily_amount_unknown,
     COUNT(CASE WHEN pao.platform = '1' THEN 1 END) AS simulation_daily_amount_web,
-    COUNT(CASE WHEN pao.platform ='2' THEN 1 END) AS simulation_daily_amount_ios,
+    COUNT(CASE WHEN pao.platform ='2' THEN 1 END) AS simulation_daily_amount_app,
     COUNT(CASE WHEN pao.created_at <> pao.updated_at AND pao.deleted_at IS NULL AND pao.platform IS NULL THEN 1 END) AS simulation_daily_updated_amount,
     COUNT(CASE WHEN pao.created_at <> pao.updated_at AND pao.deleted_at IS NULL AND pao.platform ='1' THEN 1 END) AS simulation_daily_updated_amount_web,
-    COUNT(CASE WHEN pao.created_at <> pao.updated_at AND pao.deleted_at IS NULL AND pao.platform ='2' THEN 1 END) AS simulation_daily_updated_amount_ios,
+    COUNT(CASE WHEN pao.created_at <> pao.updated_at AND pao.deleted_at IS NULL AND pao.platform ='2' THEN 1 END) AS simulation_daily_updated_amount_app,
     COUNT(CASE WHEN pao.deleted_at IS NOT NULL AND pao.platform IS NULL THEN 1 END) AS simulation_daily_deleted_amount_unknown,
     COUNT(CASE WHEN pao.deleted_at IS NOT NULL AND pao.platform ='1' THEN 1 END) AS simulation_daily_deleted_amount_web,
-    COUNT(CASE WHEN pao.deleted_at IS NOT NULL AND pao.platform = '2' IS NULL THEN 1 END) AS simulation_daily_deleted_amount_ios
+    COUNT(CASE WHEN pao.deleted_at IS NOT NULL AND pao.platform = '2' IS NULL THEN 1 END) AS simulation_daily_deleted_amount_app
 FROM
     plant_area_objects  AS pao
 LEFT OUTER JOIN
@@ -636,13 +740,13 @@ SELECT
     DATE (pg.created_at),
     COUNT(CASE WHEN pg.platform IS NULL THEN 1 END) AS pipe_group_daily_amount_unknown,
     COUNT(CASE WHEN pg.platform = '1' THEN 1 END) AS pipe_group_daily_amount_web,
-    COUNT(CASE WHEN pg.platform = '2' THEN 1 END) AS pipe_group_daily_amount_ios,
+    COUNT(CASE WHEN pg.platform = '2' THEN 1 END) AS pipe_group_daily_amount_app,
     COUNT(CASE WHEN pg.created_at <> pg.updated_at AND pg.deleted_at IS NULL AND pg.platform IS NULL THEN 1 END) AS pipe_group_daily_updated_amount_unknown,
     COUNT(CASE WHEN pg.created_at <> pg.updated_at AND pg.deleted_at IS NULL AND pg.platform ='1' THEN 1 END) AS pipe_group_daily_updated_amount_web,
-    COUNT(CASE WHEN pg.created_at <> pg.updated_at AND pg.deleted_at IS NULL AND pg.platform = '2' THEN 1 END) AS pipe_group_daily_updated_amount_ios,
+    COUNT(CASE WHEN pg.created_at <> pg.updated_at AND pg.deleted_at IS NULL AND pg.platform = '2' THEN 1 END) AS pipe_group_daily_updated_amount_app,
     COUNT(CASE WHEN deleted_at IS NOT NULL AND pg.platform IS NULL THEN 1 END) AS pipe_group_daily_deleted_amount_unknown,
     COUNT(CASE WHEN deleted_at IS NOT NULL AND pg.platform='1' THEN 1 END) AS pipe_group_daily_deleted_amount_web,
-    COUNT(CASE WHEN deleted_at IS NOT NULL AND pg.platform='2' THEN 1 END) AS pipe_group_daily_deleted_amount_ios
+    COUNT(CASE WHEN deleted_at IS NOT NULL AND pg.platform='2' THEN 1 END) AS pipe_group_daily_deleted_amount_app
 FROM
     pipe_groups AS pg
 LEFT OUTER JOIN
@@ -672,6 +776,48 @@ FROM
         ON com.id = pla.company_id 
     LEFT OUTER JOIN {db}.plant_areas AS pa 
         ON pla.id = pa.plant_id
+'''
+# color code master
+q_color_code = f'''
+SELECT
+    com.id AS company_id
+    , com.name AS company_name
+    , 'asset' as Category
+    , acl.id as color_id
+    , acl.color as color_code
+    , acj.name as name_ja
+    , ace.name as name_en
+FROM
+    {db}.companies AS com 
+    LEFT OUTER JOIN {db}.asset_color_labels as acl
+        ON com.id=acl.company_id
+    LEFT OUTER JOIN {db}.asset_color_label_names as acj
+        ON acl.id = acj.asset_color_label_id and acj.language='ja'
+    LEFT OUTER JOIN {db}.asset_color_label_names as ace
+        ON acl.id = ace.asset_color_label_id and ace.language='en'
+WHERE
+    acl.id IS NOT NULL
+
+UNION ALL
+
+SELECT 
+    com.id AS company_id
+    , com.name AS company_name
+    , 'object' AS Category
+    , mil.id AS color_id
+    , mil.color AS color_code
+    , mij.name AS name_ja
+    , mie.name AS name_en
+FROM
+    {db}.companies AS com 
+    LEFT OUTER JOIN {db}.marker_importance_labels as mil
+        ON com.id=mil.company_id 
+    LEFT OUTER JOIN {db}.marker_importance_label_names as mij
+        ON mil.id = mij.marker_importance_label_id and mij.language='ja'
+    LEFT OUTER JOIN {db}.marker_importance_label_names as mie
+        ON mil.id = mie.marker_importance_label_id and mie.language='en'      
+WHERE
+    mil.id IS NOT NULL
 '''
 
 
@@ -821,6 +967,10 @@ object_area_queries = object_import_export_area('object_by_area.csv')
 # get objects' import and output queries list
 object_company_queries = object_import_export_company('object_by_company.csv')
 
+# get asset color info
+color_code_info = read_query(conn,q_color_code)
+
+
 # output user activity log
 with open(user_transaction_files + '\\user_activity_tmp_log' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
@@ -869,27 +1019,27 @@ logger.info("user_account_data csv file is created")
 # output user account total count
 with open(user_transaction_files + '\\user_account_total_count' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
-    writer.writerow((['Company ID', 'Company Name', 'Date', 'Account Total Count']))
+    writer.writerow((['Company ID', 'Company Name', 'Date', 'Account Total Count','App Download Total Count']))
     for user_account_total_count in user_account_total_counts:
         writer.writerow(
             [user_account_total_count[0], user_account_total_count[1], user_account_total_count[2],
-             user_account_total_count[3]]
+             user_account_total_count[3], user_account_total_count[4]]
         )
 logger.info("user_account_total_count csv file is created")
 
 # output registered object master
 with open(user_transaction_files + '\\registered_object_master' + '.csv', 'w', newline='', encoding='utf-8') as file:
-    writer = csv.writer(file)
-    writer.writerow(['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name', 'Object ID', 'Object Name',
-                     'Object Category', 'Object Registered Date', 'Object Update Date', 'Deleted Date', 'User ID',
+    writer = csv.writer(file,quoting=csv.QUOTE_ALL)
+    writer.writerow(['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name', 'Object ID', 'Object Category',
+                     'Object Name', 'Object Registered Date','Object Registered From', 'Object Update Date','Object Updated From', 'Deleted Date', 'Object Deleted From','User ID',
                      'User Name'])
     for registered_object_master in registered_object_masters:
         writer.writerow(
             [registered_object_master[0], registered_object_master[1], registered_object_master[2],
              registered_object_master[3], registered_object_master[4],
-             registered_object_master[5], registered_object_master[6], registered_object_master[7],
+             registered_object_master[5], registered_object_master[6].replace('\n', ' ').replace('\r', ' '), registered_object_master[7],
              registered_object_master[8], registered_object_master[9], registered_object_master[10],
-             registered_object_master[11]]
+             registered_object_master[11],registered_object_master[12],registered_object_master[13],registered_object_master[14]]
         )
 logger.info("registered_object_master csv file is created")
 
@@ -909,9 +1059,9 @@ with open(user_transaction_files + '\marker_daily_info' + '.csv', 'w', newline='
     writer = csv.writer(file)
     writer.writerow(
         ['Plant Area ID', 'Date', 'Marker Daily Registered Unknown', 'Marker Daily Registered Web',
-         'Marker Daily Registered iOS', 'Marker Daily Updated Unknown', 'Marker Daily Updated Web',
-         'Marker Daily Updated iOS', 'Marker Daily Deleted Unknown', 'Marker Daily Deleted Web',
-         'Marker Daily Deleted iOS'])
+         'Marker Daily Registered App', 'Marker Daily Updated Unknown', 'Marker Daily Updated Web',
+         'Marker Daily Updated App', 'Marker Daily Deleted Unknown', 'Marker Daily Deleted Web',
+         'Marker Daily Deleted App'])
     for _marker_daily_info in marker_daily_info:
         writer.writerow(
             [_marker_daily_info[0], _marker_daily_info[1], _marker_daily_info[2], _marker_daily_info[3],
@@ -925,11 +1075,11 @@ logger.info("marker_daily_info csv file was created.")
 with open(user_transaction_files + '\machine_daily_info' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(['Plant Area ID', 'Date', 'Machine Daily Registered Unknown', 'Machine Daily Registered Web',
-                     'Machine Daily Registered iOS',
-                     'Machine Daily Updated Unknown', 'Machine Daily Updated Web', 'Machine Daily Updated iOS',
+                     'Machine Daily Registered App',
+                     'Machine Daily Updated Unknown', 'Machine Daily Updated Web', 'Machine Daily Updated App',
                      'Machine Location Daily Registered Unknown', 'Machine Location Daily Registered Web',
-                     'Machine Location Daily Registered iOS',
-                     'Machine Daily Deleted Unknown', 'Machine Daily Deleted Web', 'Machine Daily Deleted iOS'])
+                     'Machine Location Daily Registered App',
+                     'Machine Daily Deleted Unknown', 'Machine Daily Deleted Web', 'Machine Daily Deleted App'])
     for _machine_daily_info in machine_daily_info:
         writer.writerow(
             [_machine_daily_info[0], _machine_daily_info[1], _machine_daily_info[2], _machine_daily_info[3],
@@ -944,9 +1094,9 @@ with open(user_transaction_files + '\measurement_daily_info' + '.csv', 'w', newl
     writer = csv.writer(file)
     writer.writerow(
         ['Plant Area ID', 'Date', 'Measurement Daily Registered Unknown', 'Measurement Daily Registered Web',
-         'Measurement Daily Registered iOS', 'Measurement Daily Updated Unknown', 'Measurement Daily Updated Web',
-         'Measurement Daily Updated iOS',
-         'Measurement Daily Deleted Unknown', 'Measurement Daily Deleted Web', 'Measurement Daily Deleted iOS'])
+         'Measurement Daily Registered App', 'Measurement Daily Updated Unknown', 'Measurement Daily Updated Web',
+         'Measurement Daily Updated App',
+         'Measurement Daily Deleted Unknown', 'Measurement Daily Deleted Web', 'Measurement Daily Deleted App'])
     for _measurement_daily_info in measurement_daily_info:
         writer.writerow(
             [_measurement_daily_info[0], _measurement_daily_info[1], _measurement_daily_info[2],
@@ -960,10 +1110,10 @@ logger.info("measurement_length_daily_info csv file was created.")
 with open(user_transaction_files + '\simulation_daily_info' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(['Plant Area ID', 'Date', 'Simulation Daily Registered Unknown', 'Simulation Daily Registered Web',
-                     'Simulation Daily Registered iOS',
-                     'Simulation Daily Updated Unknown', 'Simulation Daily Updated Web', 'Simulation Daily Updated iOS',
+                     'Simulation Daily Registered App',
+                     'Simulation Daily Updated Unknown', 'Simulation Daily Updated Web', 'Simulation Daily Updated App',
                      'Simulation Dialy Deleted Unknown', 'Simulation Dialy Deleted Web',
-                     'Simulation Dialy Deleted iOS'])
+                     'Simulation Dialy Deleted App'])
     for _simulation_daily_info in simulation_daily_info:
         writer.writerow(
             [_simulation_daily_info[0], _simulation_daily_info[1], _simulation_daily_info[2], _simulation_daily_info[3],
@@ -976,9 +1126,9 @@ logger.info("simulation_daily_info csv file was created.")
 with open(user_transaction_files + '\pipe_daily_info' + '.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(
-        ['Plant Area ID', 'Date', 'PipeNavi Daily Registered Unknown', 'PipeNavi Daily Registered Web', 'PipeNavi Daily Registered iOS',
-         'PipeNavi Daily Updated Unknown', 'PipeNavi Daily Updated Web', 'PipeNavi Daily Updated iOS',
-         'PipeNavi Daily Deleted Unknown','PipeNavi Daily Deleted Web','PipeNavi Daily Deleted iOS'])
+        ['Plant Area ID', 'Date', 'PipeNavi Daily Registered Unknown', 'PipeNavi Daily Registered Web', 'PipeNavi Daily Registered App',
+         'PipeNavi Daily Updated Unknown', 'PipeNavi Daily Updated Web', 'PipeNavi Daily Updated App',
+         'PipeNavi Daily Deleted Unknown','PipeNavi Daily Deleted Web','PipeNavi Daily Deleted App'])
     for _pipe_daily_info in pipe_daily_info:
         writer.writerow(
             [_pipe_daily_info[0], _pipe_daily_info[1], int(_pipe_daily_info[2]), int(_pipe_daily_info[3]),
@@ -1025,6 +1175,18 @@ for object, object_sql in object_company_queries.items():
                 [_object_daily_info[0], _object_daily_info[1], _object_daily_info[2]]
             )
     logger.info(object + " csv file was created.")
+
+# create color code master file.
+with open(user_transaction_files + '\color_code_master' + '.csv', 'w', newline='', encoding='utf-8') as file:
+    writer = csv.writer(file)
+    writer.writerow(['Company ID', 'Company Name', 'Category','Color ID','Color Code', 'Name Ja','Name En'])
+    for _color_code_info in color_code_info:
+        writer.writerow(
+            [_color_code_info[0], _color_code_info[1], _color_code_info[2], _color_code_info[3],
+             _color_code_info[4], _color_code_info[5],_color_code_info[6]]
+        )
+logger.info("asset_color_code_master csv file was created.")
+
 
 # load csv to dataframe
 logger.info("Loading each csv files...")
@@ -1128,26 +1290,26 @@ cad = pd.merge(cad, import_asset_work_small_category_xlsx_info, on=["Plant Area 
 # change columns order
 new_column_order = ['Company ID', 'Company Name', 'Plant Area ID', 'Plant Area Name',
                     'Date', 'Marker Daily Registered Unknown', 'Marker Daily Registered Web',
-                    'Marker Daily Registered iOS', 'Machine Daily Registered Unknown', 'Machine Daily Registered Web',
-                    'Machine Daily Registered iOS', 'Measurement Daily Registered Unknown',
-                    'Measurement Daily Registered Web', 'Measurement Daily Registered iOS',
-                    'Simulation Daily Registered Unknown',  'Simulation Daily Registered Web',  'Simulation Daily Registered iOS',
-                    'PipeNavi Daily Registered Unknown','PipeNavi Daily Registered Web','PipeNavi Daily Registered iOS',
+                    'Marker Daily Registered App', 'Machine Daily Registered Unknown', 'Machine Daily Registered Web',
+                    'Machine Daily Registered App', 'Measurement Daily Registered Unknown',
+                    'Measurement Daily Registered Web', 'Measurement Daily Registered App',
+                    'Simulation Daily Registered Unknown',  'Simulation Daily Registered Web',  'Simulation Daily Registered App',
+                    'PipeNavi Daily Registered Unknown','PipeNavi Daily Registered Web','PipeNavi Daily Registered App',
                     'Machine Location Daily Registered Unknown', 'Machine Location Daily Registered Web',
-                    'Machine Location Daily Registered iOS',
-                    'Marker Daily Updated Unknown', 'Marker Daily Updated Web', 'Marker Daily Updated iOS',
-                    'Machine Daily Updated Unknown', 'Machine Daily Updated Web', 'Machine Daily Updated iOS',
+                    'Machine Location Daily Registered App',
+                    'Marker Daily Updated Unknown', 'Marker Daily Updated Web', 'Marker Daily Updated App',
+                    'Machine Daily Updated Unknown', 'Machine Daily Updated Web', 'Machine Daily Updated App',
                     'Measurement Daily Updated Unknown', 'Measurement Daily Updated Web',
-                    'Measurement Daily Updated iOS',
-                    'Simulation Daily Updated Unknown','Simulation Daily Updated Web','Simulation Daily Updated iOS',
-                    'PipeNavi Daily Updated Unknown',   'PipeNavi Daily Updated Web',   'PipeNavi Daily Updated iOS',
+                    'Measurement Daily Updated App',
+                    'Simulation Daily Updated Unknown','Simulation Daily Updated Web','Simulation Daily Updated App',
+                    'PipeNavi Daily Updated Unknown',   'PipeNavi Daily Updated Web',   'PipeNavi Daily Updated App',
                     'Marker Daily Deleted Unknown', 'Marker Daily Deleted Web',
-                    'Marker Daily Deleted iOS', 'Machine Daily Deleted Unknown', 'Machine Daily Deleted Web',
-                    'Machine Daily Deleted iOS',
+                    'Marker Daily Deleted App', 'Machine Daily Deleted Unknown', 'Machine Daily Deleted Web',
+                    'Machine Daily Deleted App',
                     'Measurement Daily Deleted Unknown', 'Measurement Daily Deleted Web',
-                    'Measurement Daily Deleted iOS',
-                    'Simulation Dialy Deleted Unknown',  'Simulation Dialy Deleted Web',  'Simulation Dialy Deleted iOS',
-                    'PipeNavi Daily Deleted unknown', 'PipeNavi Daily Deleted Web', 'PipeNavi Daily Deleted iOS',
+                    'Measurement Daily Deleted App',
+                    'Simulation Dialy Deleted Unknown',  'Simulation Dialy Deleted Web',  'Simulation Dialy Deleted App',
+                    'PipeNavi Daily Deleted Unknown', 'PipeNavi Daily Deleted Web', 'PipeNavi Daily Deleted App',
                     'export_marker', 'import_marker', 'export_measure_length', 'import_measure_length', 'export_object',
                     'import_object', 'export_asset_data', 'import_asset_data', 'export_pipe_group_xlsx',
                     'import_pipe_group_xlsx',
@@ -1202,6 +1364,8 @@ cad.rename(
              },
     inplace=True
 )
+
+cad['Plant Area ID'] = cad['Plant Area ID'].astype(pd.Int64Dtype(),errors='ignore')
 
 # output
 cad.to_csv(user_transaction_files + '\daily_object_transaction_data' + '.csv', encoding="utf-8", index=False)
